@@ -631,12 +631,12 @@ func vorbisTagsToMergeFromSource() map[string]bool {
 	}
 }
 
-// buildVorbisCommentBlock returns a FLAC metadata block with ALBUM, ARTIST, TITLE, TRACKNUMBER
-// from the CUE sheet and track, and merges in source FLAC tags (GENRE, DATE, ALBUMARTIST, etc.)
-// when present so split tracks retain full metadata for players and libraries.
-//
-//nolint:cyclop
-func buildVorbisCommentBlock(cue *CueSheet, track *CueTrack, sourceVorbis *meta.VorbisComment) *meta.Block {
+// MergeTrackTags returns the ordered Vorbis tag pairs for one track: TITLE,
+// TRACKNUMBER, ALBUM, ARTIST from the CUE sheet, merged with allowlisted source
+// tags (GENRE, DATE, ALBUMARTIST, ...). The CUE values win for the keys it owns.
+// sourceTags is the source file's existing tags as [key,value] pairs; keys are
+// compared case-insensitively.
+func MergeTrackTags(cue *CueSheet, track *CueTrack, sourceTags [][2]string) [][2]string {
 	artist := track.Performer
 	if artist == "" {
 		artist = cue.Performer
@@ -664,24 +664,35 @@ func buildVorbisCommentBlock(cue *CueSheet, track *CueTrack, sourceVorbis *meta.
 		haveKey[strings.ToUpper(pair[0])] = true
 	}
 
-	// Copy source VorbisComment tags that are not in the CUE sheet.
-	if sourceVorbis != nil {
-		for _, pair := range sourceVorbis.Tags {
-			tagKey := strings.ToUpper(pair[0])
-			if vorbisTagsFromCUE()[tagKey] || haveKey[tagKey] {
-				continue
-			}
+	for _, pair := range sourceTags {
+		tagKey := strings.ToUpper(pair[0])
+		if vorbisTagsFromCUE()[tagKey] || haveKey[tagKey] {
+			continue
+		}
 
-			if vorbisTagsToMergeFromSource()[tagKey] {
-				tags = append(tags, [2]string{pair[0], pair[1]})
-				haveKey[tagKey] = true
-			}
+		if vorbisTagsToMergeFromSource()[tagKey] {
+			tags = append(tags, [2]string{pair[0], pair[1]})
+			haveKey[tagKey] = true
 		}
 	}
 
+	return tags
+}
+
+// buildVorbisCommentBlock returns a FLAC metadata block with ALBUM, ARTIST, TITLE, TRACKNUMBER
+// from the CUE sheet and track, and merges in source FLAC tags (GENRE, DATE, ALBUMARTIST, etc.)
+// when present so split tracks retain full metadata for players and libraries.
+func buildVorbisCommentBlock(cue *CueSheet, track *CueTrack, sourceVorbis *meta.VorbisComment) *meta.Block {
+	var source [][2]string
+	if sourceVorbis != nil {
+		source = sourceVorbis.Tags
+	}
+
+	pairs := MergeTrackTags(cue, track, source)
+
 	comment := &meta.VorbisComment{
 		Vendor: "golift.io/xtractr",
-		Tags:   tags,
+		Tags:   pairs,
 	}
 
 	return &meta.Block{

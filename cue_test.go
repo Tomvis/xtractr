@@ -947,3 +947,32 @@ func TestCueSupportedExtensions(t *testing.T) {
 
 	assert.True(t, found, ".cue should be in supported extensions list")
 }
+
+func TestMergeTrackTags(t *testing.T) {
+	t.Parallel()
+
+	cue := &xtractr.CueSheet{Title: "The Album", Performer: "The Band"}
+	track := &xtractr.CueTrack{Number: 3, Title: "Song Three", Performer: ""}
+	source := [][2]string{
+		{"GENRE", "Death Metal"},
+		{"DATE", "2002"},
+		{"ALBUM", "WRONG - should be ignored, cue wins"},
+		{"REPLAYGAIN_TRACK_GAIN", "-6.0 dB"}, // not in merge allowlist -> dropped
+	}
+
+	got := xtractr.MergeTrackTags(cue, track, source)
+
+	m := map[string]string{}
+	for _, kv := range got {
+		m[kv[0]] = kv[1]
+	}
+
+	require.Equal(t, "Song Three", m["TITLE"])
+	require.Equal(t, "3", m["TRACKNUMBER"])
+	require.Equal(t, "The Album", m["ALBUM"])   // cue wins over source
+	require.Equal(t, "The Band", m["ARTIST"])   // falls back to album performer
+	require.Equal(t, "Death Metal", m["GENRE"]) // merged from source
+	require.Equal(t, "2002", m["DATE"])         // merged from source
+	_, hasRG := m["REPLAYGAIN_TRACK_GAIN"]
+	require.False(t, hasRG, "non-allowlisted source tag must be dropped")
+}

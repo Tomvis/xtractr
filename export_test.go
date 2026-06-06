@@ -82,3 +82,25 @@ func ReadVorbisTagForTest(t interface{ Fatalf(string, ...any) }, path, key strin
 
 	return ""
 }
+
+// SplitViaFFmpegForTest wires parse + resolve + split for end-to-end tests.
+func SplitViaFFmpegForTest(t interface{ Fatalf(string, ...any) }, cueDir, cueFile, cuePath, outDir string) (uint64, []string) {
+	cue, timestamps, err := parseCueSheetFile(cuePath)
+	if err != nil {
+		t.Fatalf("parse cue: %v", err)
+	}
+
+	audioPath, err := resolveCueAudioPath(cueDir, cueFile, cuePath)
+	if err != nil {
+		t.Fatalf("resolve audio: %v", err)
+	}
+
+	xFile := &XFile{OutputDir: outDir, FileMode: 0o644, DirMode: 0o755}
+
+	size, files, err := splitViaFFmpeg(xFile, audioPath, cue, timestamps)
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+
+	return size, files
+}

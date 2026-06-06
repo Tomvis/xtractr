@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -208,4 +209,68 @@ func retagFLAC(path string, tagPairs [][2]string, coverPath string, fileMode os.
 	_ = os.Chmod(path, fileMode)
 
 	return nil
+}
+
+// splitViaFFmpeg splits a non-FLAC source referenced by a CUE into per-track
+// FLACs in xFile.OutputDir, tagging each via go-flac. Returns (totalBytes,
+// outputFiles, error) — the tracks plus an optional extracted cover file.
+func splitViaFFmpeg(xFile *XFile, audioPath string, cue *CueSheet, timestamps []cueTimestamp) (uint64, []string, error) {
+	if !ffmpegAvailable() {
+		return 0, nil, ErrFFmpegNotFound
+	}
+
+	probe, err := probeAudio(audioPath)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	if err := os.MkdirAll(xFile.OutputDir, xFile.DirMode); err != nil {
+		return 0, nil, fmt.Errorf("creating output directory: %w", err)
+	}
+
+	starts := make([]float64, len(timestamps))
+	for i, ts := range timestamps {
+		starts[i] = ts.toSeconds()
+	}
+
+	durs := trackDurations(starts)
+
+	// Extract cover art once (named like the FLAC path: cover.jpg/png), shared by all tracks.
+	var coverPath string
+	if probe.hasCover {
+		coverPath = extractCover(audioPath, filepath.Join(xFile.OutputDir, "cover"))
+	}
+
+	var (
+		total uint64
+		files = make([]string, 0, len(cue.Tracks)+1)
+	)
+
+	for i := range cue.Tracks {
+		track := &cue.Tracks[i]
+		outName := formatTrackFilename(track) // shared with the FLAC path
+		outPath := filepath.Join(xFile.OutputDir, outName)
+
+		if err := cutTrackFLAC(audioPath, outPath, starts[i], durs[i]); err != nil {
+			return total, files, err
+		}
+
+		pairs := MergeTrackTags(cue, track, probe.tags)
+		if err := retagFLAC(outPath, pairs, coverPath, xFile.FileMode); err != nil {
+			return total, files, err
+		}
+
+		if fi, statErr := os.Stat(outPath); statErr == nil {
+			total += uint64(fi.Size())
+		}
+
+		files = append(files, outPath)
+		xFile.Debugf("Wrote track %d via ffmpeg: %s", track.Number, outPath)
+	}
+
+	if coverPath != "" {
+		files = append(files, coverPath)
+	}
+
+	return total, files, nil
 }

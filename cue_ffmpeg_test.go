@@ -1,6 +1,7 @@
 package xtractr_test
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -92,4 +93,37 @@ func TestRetagFLAC_WritesTags(t *testing.T) {
 
 	got := xtractr.ReadVorbisTagForTest(t, src, "TITLE")
 	require.Equal(t, "Hello", got)
+}
+
+func TestSplitViaFFmpeg_EndToEnd(t *testing.T) {
+	t.Parallel()
+	ffmpegOrSkip(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "album.wav")
+	makeSineSource(t, src, 9) // 9-second source
+
+	cue := `PERFORMER "The Band"
+TITLE "The Album"
+FILE "album.wav" WAVE
+  TRACK 01 AUDIO
+    TITLE "One"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Two"
+    INDEX 01 00:03:00
+  TRACK 03 AUDIO
+    TITLE "Three"
+    INDEX 01 00:06:00`
+	cuePath := filepath.Join(dir, "album.cue")
+	require.NoError(t, os.WriteFile(cuePath, []byte(cue), 0o644))
+
+	out := t.TempDir()
+	size, files := xtractr.SplitViaFFmpegForTest(t, dir, "album.wav", cuePath, out)
+
+	require.Equal(t, 3, len(files), "expected 3 track files (no cover)")
+	require.Greater(t, size, uint64(0))
+
+	require.Equal(t, "Two", xtractr.ReadVorbisTagForTest(t, filepath.Join(out, "02 - Two.flac"), "TITLE"))
+	require.Equal(t, "The Album", xtractr.ReadVorbisTagForTest(t, filepath.Join(out, "02 - Two.flac"), "ALBUM"))
 }

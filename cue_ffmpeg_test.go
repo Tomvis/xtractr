@@ -78,3 +78,18 @@ func TestCutTrackFLAC_Duration(t *testing.T) {
 	got := xtractr.ProbeDurationForTest(t, out)
 	require.InDelta(t, 3.0, got, 0.05) // sample-accurate within ~50ms
 }
+
+func TestRetagFLAC_WritesTags(t *testing.T) {
+	t.Parallel()
+	ffmpegOrSkip(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.flac")
+	makeSineSource(t, src, 2)
+
+	pairs := [][2]string{{"TITLE", "Hello"}, {"TRACKNUMBER", "1"}, {"ALBUM", "Demo"}}
+	require.NoError(t, xtractr.RetagFLACForTest(src, pairs, "", 0o644))
+
+	got := xtractr.ReadVorbisTagForTest(t, src, "TITLE")
+	require.Equal(t, "Hello", got)
+}

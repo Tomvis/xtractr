@@ -3,9 +3,14 @@ package xtractr
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+
+	flacpicture "github.com/go-flac/flacpicture/v2"
+	flacvorbis "github.com/go-flac/flacvorbis/v2"
+	goflac "github.com/go-flac/go-flac/v2"
 )
 
 // ffmpegAvailable reports whether both ffmpeg and ffprobe are on PATH.
@@ -120,4 +125,87 @@ func cutTrackFLAC(src, outPath string, startSec, durSec float64) error {
 // formatSeconds renders seconds for ffmpeg with microsecond precision.
 func formatSeconds(s float64) string {
 	return strconv.FormatFloat(s, 'f', 6, 64)
+}
+
+// extractCover writes embedded cover art from src to destNoExt + the right
+// extension and returns the written path, or "" if there is no cover.
+func extractCover(src, destNoExt string) string {
+	for _, ext := range []string{".jpg", ".png"} {
+		dest := destNoExt + ext
+
+		cmd := exec.Command("ffmpeg", "-nostdin", "-v", "error", "-y",
+			"-i", src, "-an", "-c:v", "copy", "-frames:v", "1", dest)
+		if err := cmd.Run(); err == nil {
+			if fi, statErr := os.Stat(dest); statErr == nil && fi.Size() > 0 {
+				return dest
+			}
+		}
+
+		_ = os.Remove(dest)
+	}
+
+	return ""
+}
+
+// retagFLAC writes Vorbis tags (and an optional cover) onto an existing FLAC
+// using metadata-only edits — the audio frames are not re-encoded.
+func retagFLAC(path string, tagPairs [][2]string, coverPath string, fileMode os.FileMode) error {
+	f, err := goflac.ParseFile(path)
+	if err != nil {
+		return fmt.Errorf("parsing flac for retag: %w", err)
+	}
+
+	// Drop any existing VORBIS_COMMENT / PICTURE blocks (ffmpeg wrote none, but be safe).
+	// Filter in place: kept shares f.Meta's backing array, which is safe because
+	// len(kept) <= range index at every step (we only ever drop, never reorder), so
+	// the slot kept writes has already been read by the loop. Elements are pointers.
+	kept := f.Meta[:0]
+	for _, b := range f.Meta {
+		if b.Type == goflac.VorbisComment || b.Type == goflac.Picture {
+			continue
+		}
+
+		kept = append(kept, b)
+	}
+
+	f.Meta = kept
+
+	cmt := flacvorbis.New()
+	cmt.Vendor = "golift.io/xtractr"
+
+	for _, kv := range tagPairs {
+		if addErr := cmt.Add(kv[0], kv[1]); addErr != nil {
+			return fmt.Errorf("adding tag %s: %w", kv[0], addErr)
+		}
+	}
+
+	cmtBlock := cmt.Marshal()
+	f.Meta = append(f.Meta, &cmtBlock)
+
+	// Cover embedding is best-effort: a missing/unreadable/undecodable cover must not
+	// fail the whole re-tag (the tracks are still valid; art is a nice-to-have).
+	if coverPath != "" {
+		data, readErr := os.ReadFile(coverPath)
+		if readErr == nil {
+			mime := "image/jpeg"
+			if strings.HasSuffix(strings.ToLower(coverPath), ".png") {
+				mime = "image/png"
+			}
+
+			pic, picErr := flacpicture.NewFromImageData(
+				flacpicture.PictureTypeFrontCover, "", data, mime)
+			if picErr == nil {
+				picBlock := pic.Marshal()
+				f.Meta = append(f.Meta, &picBlock)
+			}
+		}
+	}
+
+	if err := f.Save(path); err != nil {
+		return fmt.Errorf("saving retagged flac: %w", err)
+	}
+
+	_ = os.Chmod(path, fileMode)
+
+	return nil
 }

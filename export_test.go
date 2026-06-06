@@ -1,5 +1,12 @@
 package xtractr
 
+import (
+	"os"
+
+	flacvorbis "github.com/go-flac/flacvorbis/v2"
+	goflac "github.com/go-flac/go-flac/v2"
+)
+
 // SecondsForTest exposes cueTimestamp.toSeconds for tests.
 func SecondsForTest(min, sec, frames int) float64 {
 	return cueTimestamp{minutes: min, seconds: sec, frames: frames}.toSeconds()
@@ -43,4 +50,35 @@ func ProbeTagsForTest(t interface{ Fatalf(string, ...any) }, path string) map[st
 // CutTrackFLACForTest exposes cutTrackFLAC for tests.
 func CutTrackFLACForTest(src, out string, startSec, durSec float64) error {
 	return cutTrackFLAC(src, out, startSec, durSec)
+}
+
+// RetagFLACForTest exposes retagFLAC for tests.
+func RetagFLACForTest(path string, tagPairs [][2]string, coverPath string, mode os.FileMode) error {
+	return retagFLAC(path, tagPairs, coverPath, mode)
+}
+
+// ReadVorbisTagForTest reads back a single Vorbis tag value (first match).
+func ReadVorbisTagForTest(t interface{ Fatalf(string, ...any) }, path, key string) string {
+	f, err := goflac.ParseFile(path)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	for _, b := range f.Meta {
+		if b.Type != goflac.VorbisComment {
+			continue
+		}
+
+		cmt, perr := flacvorbis.ParseFromMetaDataBlock(*b)
+		if perr != nil {
+			t.Fatalf("parse vorbis: %v", perr)
+		}
+
+		vals, _ := cmt.Get(key)
+		if len(vals) > 0 {
+			return vals[0]
+		}
+	}
+
+	return ""
 }

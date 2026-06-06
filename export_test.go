@@ -39,3 +39,8 @@ func ProbeTagsForTest(t interface{ Fatalf(string, ...any) }, path string) map[st
 
 	return m
 }
+
+// CutTrackFLACForTest exposes cutTrackFLAC for tests.
+func CutTrackFLACForTest(src, out string, startSec, durSec float64) error {
+	return cutTrackFLAC(src, out, startSec, durSec)
+}

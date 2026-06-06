@@ -93,3 +93,31 @@ func probeAudio(path string) (*audioProbe, error) {
 
 	return probe, nil
 }
+
+// cutTrackFLAC encodes one track to FLAC from src, starting at startSec.
+// If durSec > 0 a -t duration is applied; durSec == 0 means "to EOF" (last track).
+// No metadata is copied from the source (-map_metadata -1); tagging happens later.
+// Input -ss + default accurate_seek yields sample-accurate cuts for lossless audio.
+func cutTrackFLAC(src, outPath string, startSec, durSec float64) error {
+	args := []string{"-nostdin", "-v", "error", "-ss", formatSeconds(startSec), "-i", src}
+	if durSec > 0 {
+		args = append(args, "-t", formatSeconds(durSec))
+	}
+
+	args = append(args, "-vn", "-c:a", "flac", "-compression_level", "8",
+		"-map_metadata", "-1", "-y", outPath)
+
+	cmd := exec.Command("ffmpeg", args...)
+
+	stderr, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg cut %s: %w: %s", outPath, err, strings.TrimSpace(string(stderr)))
+	}
+
+	return nil
+}
+
+// formatSeconds renders seconds for ffmpeg with microsecond precision.
+func formatSeconds(s float64) string {
+	return strconv.FormatFloat(s, 'f', 6, 64)
+}

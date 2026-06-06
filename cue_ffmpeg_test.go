@@ -63,3 +63,18 @@ func TestProbeAudio_Duration(t *testing.T) {
 	got := xtractr.ProbeDurationForTest(t, src)
 	require.InDelta(t, 5.0, got, 0.2)
 }
+
+func TestCutTrackFLAC_Duration(t *testing.T) {
+	t.Parallel()
+	ffmpegOrSkip(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.flac")
+	makeSineSource(t, src, 10)
+
+	out := filepath.Join(dir, "track.flac")
+	require.NoError(t, xtractr.CutTrackFLACForTest(src, out, 2.0, 3.0)) // 2s..5s -> 3s
+
+	got := xtractr.ProbeDurationForTest(t, out)
+	require.InDelta(t, 3.0, got, 0.05) // sample-accurate within ~50ms
+}

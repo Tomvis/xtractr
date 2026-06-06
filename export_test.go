@@ -14,3 +14,13 @@ func TrackDurationsForTest(starts []float64) []float64 {
 func ResolveCueAudioPathForTest(cueDir, cueFile, cueFilePath string) (string, error) {
 	return resolveCueAudioPath(cueDir, cueFile, cueFilePath)
 }
+
+// ProbeDurationForTest exposes probeAudio's duration for tests.
+func ProbeDurationForTest(t interface{ Fatalf(string, ...any) }, path string) float64 {
+	p, err := probeAudio(path)
+	if err != nil {
+		t.Fatalf("probeAudio: %v", err)
+	}
+
+	return p.durationSec
+}

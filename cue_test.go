@@ -976,3 +976,18 @@ func TestMergeTrackTags(t *testing.T) {
 	_, hasRG := m["REPLAYGAIN_TRACK_GAIN"]
 	require.False(t, hasRG, "non-allowlisted source tag must be dropped")
 }
+
+func TestCueTimestampSeconds_And_Boundaries(t *testing.T) {
+	t.Parallel()
+
+	// 1:30:37 -> 90 + 37/75 = 90.4933... seconds
+	require.InDelta(t, 90.49333, xtractr.SecondsForTest(1, 30, 37), 0.0001)
+
+	// Three tracks starting at 0, 60.0, 150.0 seconds.
+	starts := []float64{0, 60.0, 150.0}
+	durs := xtractr.TrackDurationsForTest(starts)
+	require.Len(t, durs, 3)
+	require.InDelta(t, 60.0, durs[0], 0.0001)
+	require.InDelta(t, 90.0, durs[1], 0.0001)
+	require.Equal(t, 0.0, durs[2]) // last track: 0 means "to EOF"
+}

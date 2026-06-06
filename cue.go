@@ -86,6 +86,29 @@ func (t cueTimestamp) toSamples(sampleRate uint32) uint64 {
 	return samples
 }
 
+// toSeconds converts a CUE timestamp (MM:SS:FF) to seconds.
+func (t cueTimestamp) toSeconds() float64 {
+	const secondsPerMinute = 60
+
+	return float64(t.minutes*secondsPerMinute+t.seconds) + float64(t.frames)/cdFramesPerSecond
+}
+
+// trackDurations returns the duration (seconds) of each track given the ordered
+// start times. The final track's duration is 0, signalling "encode to EOF" (no -t
+// flag) so it captures any trailing samples.
+func trackDurations(starts []float64) []float64 {
+	durs := make([]float64, len(starts))
+	for i := range starts {
+		if i < len(starts)-1 {
+			durs[i] = starts[i+1] - starts[i]
+		} else {
+			durs[i] = 0 // last track -> to EOF
+		}
+	}
+
+	return durs
+}
+
 // ExtractCUE extracts individual tracks from a FLAC file referenced by a CUE sheet.
 // The xFile.FilePath should point to the .cue file.
 func ExtractCUE(xFile *XFile) (size uint64, files, archives []string, err error) {

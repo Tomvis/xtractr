@@ -20,6 +20,21 @@ import (
 	"github.com/mewkiz/flac/meta"
 )
 
+// supportedCueAudioExts lists the audio file extensions (lowercase, with dot)
+// that ExtractCUE can split. FLAC uses the pure-Go path; the rest use ffmpeg.
+var supportedCueAudioExts = []string{".flac", ".ape", ".wv", ".m4a", ".wav"}
+
+// isSupportedCueAudioExt reports whether ext (lowercase, with leading dot) is splittable.
+func isSupportedCueAudioExt(ext string) bool {
+	for _, e := range supportedCueAudioExts {
+		if e == ext {
+			return true
+		}
+	}
+
+	return false
+}
+
 // ErrUTF16LengthInvalid is returned when the length of a UTF-16 encoded byte slice is not even.
 var ErrUTF16LengthInvalid = errors.New("invalid UTF-16 length")
 

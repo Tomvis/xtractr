@@ -35,6 +35,23 @@ func makeSineSource(t *testing.T, outPath string, seconds int) {
 	require.NoError(t, err, "ffmpeg gen: %s", string(out))
 }
 
+func TestProbeAudio_StreamLevelTags(t *testing.T) {
+	t.Parallel()
+	ffmpegOrSkip(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.wv") // WavPack: ffmpeg can encode it; tags go via APEv2
+	cmd := exec.Command("ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+		"-i", "sine=frequency=440:sample_rate=44100:duration=2", "-ac", "2",
+		"-metadata", "GENRE=TestGenre", src)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("no wavpack encoder in this ffmpeg build: %s", out)
+	}
+
+	tags := xtractr.ProbeTagsForTest(t, src)
+	require.Equal(t, "TestGenre", tags["GENRE"], "source tag must be read (from stream or format level)")
+}
+
 func TestProbeAudio_Duration(t *testing.T) {
 	t.Parallel()
 	ffmpegOrSkip(t)

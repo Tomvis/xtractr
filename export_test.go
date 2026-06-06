@@ -24,3 +24,18 @@ func ProbeDurationForTest(t interface{ Fatalf(string, ...any) }, path string) fl
 
 	return p.durationSec
 }
+
+// ProbeTagsForTest exposes probeAudio's collected tags as a map for tests.
+func ProbeTagsForTest(t interface{ Fatalf(string, ...any) }, path string) map[string]string {
+	p, err := probeAudio(path)
+	if err != nil {
+		t.Fatalf("probeAudio: %v", err)
+	}
+
+	m := map[string]string{}
+	for _, kv := range p.tags {
+		m[kv[0]] = kv[1]
+	}
+
+	return m
+}

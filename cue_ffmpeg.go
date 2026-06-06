@@ -64,9 +64,30 @@ func probeAudio(path string) (*audioProbe, error) {
 		probe.tags = append(probe.tags, [2]string{strings.ToUpper(key), val})
 	}
 
+	// APEv2 tags for Monkey's Audio (.ape) and WavPack (.wv) live on the audio
+	// stream, not in format. Merge stream tags too; format-level tags win on conflict.
+	have := map[string]bool{}
+	for _, kv := range probe.tags {
+		have[kv[0]] = true
+	}
+
 	for _, s := range parsed.Streams {
 		if s.CodecType == "video" && s.Disposition.AttachedPic == 1 {
 			probe.hasCover = true
+		}
+
+		if s.CodecType != "audio" {
+			continue
+		}
+
+		for key, val := range s.Tags {
+			upper := strings.ToUpper(key)
+			if have[upper] {
+				continue
+			}
+
+			probe.tags = append(probe.tags, [2]string{upper, val})
+			have[upper] = true
 		}
 	}
 

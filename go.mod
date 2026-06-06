@@ -11,6 +11,9 @@ require (
 	github.com/cavaliergopher/cpio v1.0.1
 	github.com/cavaliergopher/rpm v1.3.0
 	github.com/dsnet/compress v0.0.1
+	github.com/go-flac/flacpicture/v2 v2.0.2
+	github.com/go-flac/flacvorbis/v2 v2.0.2
+	github.com/go-flac/go-flac/v2 v2.0.4
 	github.com/klauspost/compress v1.18.4
 	github.com/mewkiz/flac v1.0.13
 	github.com/nwaples/rardecode/v2 v2.2.2

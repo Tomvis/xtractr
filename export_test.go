@@ -105,6 +105,21 @@ func SplitViaFFmpegForTest(t interface{ Fatalf(string, ...any) }, cueDir, cueFil
 	return size, files
 }
 
+// ProbeCoverForTest exposes probeAudio's cover codec + presence for tests.
+func ProbeCoverForTest(t interface{ Fatalf(string, ...any) }, path string) (string, bool) {
+	p, err := probeAudio(path)
+	if err != nil {
+		t.Fatalf("probeAudio: %v", err)
+	}
+
+	return p.coverCodec, p.hasCover
+}
+
+// ExtractCoverForTest exposes extractCover for tests.
+func ExtractCoverForTest(src, destNoExt, codec string) string {
+	return extractCover(src, destNoExt, codec)
+}
+
 // ExtractCUEForTest runs the full ExtractCUE on a .cue path for integration tests.
 func ExtractCUEForTest(t interface{ Fatalf(string, ...any) }, cuePath, outDir string) (uint64, []string, []string) {
 	xFile := &XFile{FilePath: cuePath, OutputDir: outDir, FileMode: 0o644, DirMode: 0o755}

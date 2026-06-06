@@ -30,6 +30,7 @@ type audioProbe struct {
 	durationSec float64
 	tags        [][2]string // upper-cased album-level source tags
 	hasCover    bool        // an attached_pic video stream is present
+	coverCodec  string      // codec_name of the attached_pic stream (e.g. "png", "mjpeg")
 }
 
 // ffprobeOutput mirrors the JSON we read from ffprobe.
@@ -40,6 +41,7 @@ type ffprobeOutput struct {
 	} `json:"format"`
 	Streams []struct {
 		CodecType   string `json:"codec_type"`
+		CodecName   string `json:"codec_name"`
 		Disposition struct {
 			AttachedPic int `json:"attached_pic"`
 		} `json:"disposition"`
@@ -80,6 +82,7 @@ func probeAudio(path string) (*audioProbe, error) {
 	for _, s := range parsed.Streams {
 		if s.CodecType == "video" && s.Disposition.AttachedPic == 1 {
 			probe.hasCover = true
+			probe.coverCodec = s.CodecName
 		}
 
 		if s.CodecType != "audio" {
@@ -128,22 +131,28 @@ func formatSeconds(s float64) string {
 	return strconv.FormatFloat(s, 'f', 6, 64)
 }
 
-// extractCover writes embedded cover art from src to destNoExt + the right
-// extension and returns the written path, or "" if there is no cover.
-func extractCover(src, destNoExt string) string {
-	for _, ext := range []string{".jpg", ".png"} {
-		dest := destNoExt + ext
-
-		cmd := exec.Command("ffmpeg", "-nostdin", "-v", "error", "-y",
-			"-i", src, "-an", "-c:v", "copy", "-frames:v", "1", dest)
-		if err := cmd.Run(); err == nil {
-			if fi, statErr := os.Stat(dest); statErr == nil && fi.Size() > 0 {
-				return dest
-			}
-		}
-
-		_ = os.Remove(dest)
+// extractCover writes the embedded cover art from src to destNoExt + the
+// extension implied by codec ("png" -> .png, mjpeg/jpeg -> .jpg). Returns the
+// written path, or "" if there is no cover. Choosing the extension from the real
+// codec keeps the file name and the embedded MIME (derived from the extension in
+// retagFLAC) correct — matching the pure-Go FLAC path.
+func extractCover(src, destNoExt, codec string) string {
+	ext := ".jpg"
+	if strings.EqualFold(codec, "png") {
+		ext = ".png"
 	}
+
+	dest := destNoExt + ext
+
+	cmd := exec.Command("ffmpeg", "-nostdin", "-v", "error", "-y",
+		"-i", src, "-an", "-c:v", "copy", "-frames:v", "1", dest)
+	if err := cmd.Run(); err == nil {
+		if fi, statErr := os.Stat(dest); statErr == nil && fi.Size() > 0 {
+			return dest
+		}
+	}
+
+	_ = os.Remove(dest)
 
 	return ""
 }
@@ -238,7 +247,7 @@ func splitViaFFmpeg(xFile *XFile, audioPath string, cue *CueSheet, timestamps []
 	// Extract cover art once (named like the FLAC path: cover.jpg/png), shared by all tracks.
 	var coverPath string
 	if probe.hasCover {
-		coverPath = extractCover(audioPath, filepath.Join(xFile.OutputDir, "cover"))
+		coverPath = extractCover(audioPath, filepath.Join(xFile.OutputDir, "cover"), probe.coverCodec)
 	}
 
 	var (

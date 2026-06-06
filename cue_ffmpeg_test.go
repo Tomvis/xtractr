@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -135,6 +136,33 @@ func tryMakeSource(outPath string, seconds int) error {
 		"-ac", "2", outPath)
 
 	return cmd.Run()
+}
+
+func TestExtractCover_PNGExtension(t *testing.T) {
+	t.Parallel()
+	ffmpegOrSkip(t)
+
+	dir := t.TempDir()
+
+	// A 2x2 red PNG.
+	png := filepath.Join(dir, "art.png")
+	require.NoError(t, exec.Command("ffmpeg", "-y", "-v", "error",
+		"-f", "lavfi", "-i", "color=red:s=2x2", "-frames:v", "1", png).Run())
+
+	// A FLAC carrying that PNG as an attached picture (cover art).
+	src := filepath.Join(dir, "withcover.flac")
+	require.NoError(t, exec.Command("ffmpeg", "-y", "-v", "error",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1",
+		"-i", png, "-map", "0:a", "-map", "1:v", "-c:a", "flac", "-c:v", "copy",
+		"-disposition:v:0", "attached_pic", src).Run())
+
+	codec, hasCover := xtractr.ProbeCoverForTest(t, src)
+	require.True(t, hasCover, "source must report embedded cover")
+	require.Equal(t, "png", strings.ToLower(codec))
+
+	out := xtractr.ExtractCoverForTest(src, filepath.Join(dir, "cover"), codec)
+	require.Equal(t, filepath.Join(dir, "cover.png"), out, "PNG cover must be written as cover.png, not cover.jpg")
+	require.FileExists(t, out)
 }
 
 func TestExtractCUE_NonFLAC_EndToEnd(t *testing.T) {

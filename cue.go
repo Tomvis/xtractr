@@ -335,37 +335,31 @@ func parseCueSheet(reader io.Reader) (*CueSheet, []cueTimestamp, error) { //noli
 }
 
 // resolveCueAudioPath returns the path to the audio file referenced by the CUE.
-// If the CUE says FILE "album.wav" but the file on disk is album.flac, the .flac path is returned.
-// If the FILE line does not match any file (e.g. encoding or O vs Ö), it tries the FLAC with the same
-// base name as the CUE file (e.g. Artist - Album.cue -> Artist - Album.flac).
+// It first tries the exact FILE reference, then the same basename with each
+// supported audio extension, then the CUE's own basename with each supported
+// extension (handles encoding mismatches like O vs Ö and wrong-container CUEs).
 func resolveCueAudioPath(cueDir, cueFile, cueFilePath string) (string, error) {
-	path := filepath.Join(cueDir, cueFile)
-
-	_, err := os.Stat(path)
-	if err == nil {
-		return path, nil
+	// 1) Exact path from the FILE line.
+	exact := filepath.Join(cueDir, cueFile)
+	if _, err := os.Stat(exact); err == nil {
+		return exact, nil
 	}
 
-	ext := strings.ToLower(filepath.Ext(cueFile))
-	if ext == ".wav" {
-		flacPath := path[:len(path)-len(ext)] + ".flac"
+	// 2) FILE basename + each supported extension.
+	fileBase := strings.TrimSuffix(cueFile, filepath.Ext(cueFile))
+	// 3) CUE basename + each supported extension (fallback for name mismatches).
+	cueBase := strings.TrimSuffix(filepath.Base(cueFilePath), filepath.Ext(cueFilePath))
 
-		_, err = os.Stat(flacPath)
-		if err == nil {
-			return flacPath, nil
+	for _, base := range []string{fileBase, cueBase} {
+		for _, ext := range supportedCueAudioExts {
+			candidate := filepath.Join(cueDir, base+ext)
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate, nil
+			}
 		}
 	}
 
-	// Fallback: try the FLAC with the same base name as the CUE file (handles O vs Ö, encoding mismatches).
-	baseNoExt := strings.TrimSuffix(filepath.Base(cueFilePath), filepath.Ext(cueFilePath))
-	fallbackPath := filepath.Join(cueDir, baseNoExt+".flac")
-
-	_, err = os.Stat(fallbackPath)
-	if err == nil {
-		return fallbackPath, nil
-	}
-
-	return "", fmt.Errorf("%w: %s", ErrAudioNotFound, path)
+	return "", fmt.Errorf("%w: %s", ErrAudioNotFound, exact)
 }
 
 // splitCueLine splits a CUE line into its command and arguments.

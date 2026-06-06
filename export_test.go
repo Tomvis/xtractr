@@ -9,3 +9,8 @@ func SecondsForTest(min, sec, frames int) float64 {
 func TrackDurationsForTest(starts []float64) []float64 {
 	return trackDurations(starts)
 }
+
+// ResolveCueAudioPathForTest exposes resolveCueAudioPath for tests.
+func ResolveCueAudioPathForTest(cueDir, cueFile, cueFilePath string) (string, error) {
+	return resolveCueAudioPath(cueDir, cueFile, cueFilePath)
+}

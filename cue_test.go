@@ -991,3 +991,18 @@ func TestCueTimestampSeconds_And_Boundaries(t *testing.T) {
 	require.InDelta(t, 90.0, durs[1], 0.0001)
 	require.Equal(t, 0.0, durs[2]) // last track: 0 means "to EOF"
 }
+
+func TestResolveCueAudioPath_AltExtensions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// CUE names album.wav, but only album.ape exists on disk.
+	apePath := filepath.Join(dir, "album.ape")
+	require.NoError(t, os.WriteFile(apePath, []byte("not really ape"), 0o644))
+	cuePath := filepath.Join(dir, "album.cue")
+	require.NoError(t, os.WriteFile(cuePath, []byte(`FILE "album.wav" WAVE`+"\n"), 0o644))
+
+	got, err := xtractr.ResolveCueAudioPathForTest(dir, "album.wav", cuePath)
+	require.NoError(t, err)
+	require.Equal(t, apePath, got)
+}

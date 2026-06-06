@@ -127,3 +127,38 @@ FILE "album.wav" WAVE
 	require.Equal(t, "Two", xtractr.ReadVorbisTagForTest(t, filepath.Join(out, "02 - Two.flac"), "TITLE"))
 	require.Equal(t, "The Album", xtractr.ReadVorbisTagForTest(t, filepath.Join(out, "02 - Two.flac"), "ALBUM"))
 }
+
+// tryMakeSource attempts to encode a sine source at outPath; returns ffmpeg's error.
+func tryMakeSource(outPath string, seconds int) error {
+	cmd := exec.Command("ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+		"-i", "sine=frequency=440:sample_rate=44100:duration="+strconv.Itoa(seconds),
+		"-ac", "2", outPath)
+
+	return cmd.Run()
+}
+
+func TestExtractCUE_NonFLAC_EndToEnd(t *testing.T) {
+	t.Parallel()
+	ffmpegOrSkip(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "album.wv") // WavPack: ffmpeg can encode it
+	if err := tryMakeSource(src, 6); err != nil {
+		t.Skipf("no wavpack encoder in this ffmpeg build: %v", err)
+	}
+
+	cue := `TITLE "Album"
+FILE "album.wv" WAVE
+  TRACK 01 AUDIO
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    INDEX 01 00:03:00`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "album.cue"), []byte(cue), 0o644))
+
+	out := t.TempDir()
+	size, files, archives := xtractr.ExtractCUEForTest(t, filepath.Join(dir, "album.cue"), out)
+
+	require.Greater(t, size, uint64(0))
+	require.GreaterOrEqual(t, len(files), 3) // 2 tracks + the copied .cue
+	require.Len(t, archives, 2)              // [cue, audio]
+}

@@ -127,13 +127,17 @@ func ExtractCUE(xFile *XFile) (size uint64, files, archives []string, err error)
 		return 0, nil, nil, err
 	}
 
-	// Only FLAC is supported for now.
 	ext := strings.ToLower(filepath.Ext(audioPath))
-	if ext != ".flac" {
+
+	switch {
+	case ext == ".flac":
+		size, files, err = splitFLAC(xFile, audioPath, cue, timestamps)
+	case isSupportedCueAudioExt(ext): // .ape/.wv/.m4a/.wav -> ffmpeg path
+		size, files, err = splitViaFFmpeg(xFile, audioPath, cue, timestamps)
+	default:
 		return 0, nil, nil, fmt.Errorf("%w: %s", ErrUnsupportedAudio, ext)
 	}
 
-	size, files, err = splitFLAC(xFile, audioPath, cue, timestamps)
 	if err != nil {
 		return 0, nil, nil, err
 	}

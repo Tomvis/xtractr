@@ -414,11 +414,13 @@ func TestCueUnsupportedFormat(t *testing.T) {
 	tmpDir := t.TempDir()
 	outputDir := filepath.Join(tmpDir, "output")
 
-	wavPath := filepath.Join(tmpDir, "album.wav")
-	require.NoError(t, os.WriteFile(wavPath, []byte("fake"), 0o600))
+	// .mp3 is not in the supported set (flac/ape/wv/m4a/wav), so it must still
+	// return ErrUnsupportedAudio regardless of which path dispatches it.
+	mp3Path := filepath.Join(tmpDir, "album.mp3")
+	require.NoError(t, os.WriteFile(mp3Path, []byte("fake"), 0o600))
 
 	cueContent := strings.Join([]string{
-		`FILE "album.wav" WAVE`,
+		`FILE "album.mp3" WAVE`,
 		`  TRACK 01 AUDIO`,
 		`    TITLE "Track"`,
 		`    INDEX 01 00:00:00`,

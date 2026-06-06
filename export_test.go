@@ -104,3 +104,15 @@ func SplitViaFFmpegForTest(t interface{ Fatalf(string, ...any) }, cueDir, cueFil
 
 	return size, files
 }
+
+// ExtractCUEForTest runs the full ExtractCUE on a .cue path for integration tests.
+func ExtractCUEForTest(t interface{ Fatalf(string, ...any) }, cuePath, outDir string) (uint64, []string, []string) {
+	xFile := &XFile{FilePath: cuePath, OutputDir: outDir, FileMode: 0o644, DirMode: 0o755}
+
+	size, files, archives, err := ExtractCUE(xFile)
+	if err != nil {
+		t.Fatalf("ExtractCUE: %v", err)
+	}
+
+	return size, files, archives
+}

@@ -7,9 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unicode/utf16"
 
 	"github.com/mewkiz/flac"
@@ -160,6 +163,193 @@ func generateTestFLACWithCover(t *testing.T, path string, totalSamples uint64) {
 	writeTestFLACAudioFrames(t, enc, totalSamples)
 
 	require.NoError(t, enc.Close(), "closing FLAC encoder")
+}
+
+// decodeTrackSampleCount decodes every frame of a FLAC file and returns the total
+// number of samples (per channel). Used to verify CUE split track boundaries exactly.
+func decodeTrackSampleCount(t *testing.T, path string) uint64 {
+	t.Helper()
+
+	file, err := os.Open(path)
+	require.NoError(t, err, "opening track for decode: %s", path)
+
+	defer file.Close()
+
+	stream, err := flac.Parse(file)
+	require.NoError(t, err, "parsing track for decode: %s", path)
+
+	var total uint64
+
+	for {
+		fr, err := stream.ParseNext()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		require.NoError(t, err, "decoding frame in %s", path)
+		total += uint64(fr.Subframes[0].NSamples)
+	}
+
+	return total
+}
+
+// TestCueExtractCUE_StreamingSampleCounts is a characterization test that pins the
+// exact per-track sample counts produced by the FLAC CUE splitter, with track
+// boundaries deliberately placed mid-frame (not aligned to the 4096-sample block).
+// It guards the frame-clipping boundary math so the streaming (single-pass, bounded
+// memory) implementation stays byte-for-sample identical to the buffer-all version.
+func TestCueExtractCUE_StreamingSampleCounts(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	outputDir := filepath.Join(tmpDir, "output")
+
+	const totalSamples = uint64(3 * 60 * testSampleRate) // 7,938,000
+
+	flacPath := filepath.Join(tmpDir, "album.flac")
+	generateTestFLAC(t, flacPath, totalSamples)
+
+	// Boundaries chosen so toSamples() lands mid-4096-frame:
+	//   T2 = 01:00:37 -> 2,646,000 + 37*588 = 2,667,756 (frame 651, offset 1740)
+	//   T3 = 02:00:00 -> 5,292,000             (frame 1291, offset 4064)
+	cueContent := strings.Join([]string{
+		`PERFORMER "Test Artist"`,
+		`TITLE "Test Album"`,
+		`FILE "album.flac" WAVE`,
+		`  TRACK 01 AUDIO`,
+		`    TITLE "First"`,
+		`    INDEX 01 00:00:00`,
+		`  TRACK 02 AUDIO`,
+		`    TITLE "Second"`,
+		`    INDEX 01 01:00:37`,
+		`  TRACK 03 AUDIO`,
+		`    TITLE "Third"`,
+		`    INDEX 01 02:00:00`,
+	}, "\n") + "\n"
+	cuePath := filepath.Join(tmpDir, "album.cue")
+	require.NoError(t, os.WriteFile(cuePath, []byte(cueContent), 0o600))
+
+	xFile := &xtractr.XFile{FilePath: cuePath, OutputDir: outputDir, FileMode: 0o600, DirMode: 0o755}
+
+	_, _, _, err := xtractr.ExtractCUE(xFile) //nolint:dogsled
+	require.NoError(t, err, "extracting CUE+FLAC")
+
+	// Expected per-track sample counts from the CUE boundaries above.
+	expectedCounts := []uint64{
+		2_667_756,             // T1: 0 .. 2,667,756
+		5_292_000 - 2_667_756, // T2: 2,667,756 .. 5,292,000 = 2,624,244
+		totalSamples - 5_292_000, // T3: 5,292,000 .. 7,938,000 = 2,646,000
+	}
+
+	trackNames := []string{"01 - First.flac", "02 - Second.flac", "03 - Third.flac"}
+
+	var sum uint64
+
+	for idx, name := range trackNames {
+		got := decodeTrackSampleCount(t, filepath.Join(outputDir, name))
+		assert.Equal(t, expectedCounts[idx], got, "track %d (%s) decoded sample count", idx+1, name)
+		sum += got
+	}
+
+	// Conservation: every source sample lands in exactly one track (track 1 starts at 0, no pregap).
+	assert.Equal(t, totalSamples, sum, "total decoded samples across tracks must equal source")
+}
+
+// TestCueExtractCUE_StreamingMemoryIsBounded verifies the FLAC CUE splitter streams
+// rather than buffering the whole decoded file. It splits a ~30M-sample FLAC (~240 MB
+// if every decoded frame were held at once) while sampling peak heap; the single-pass
+// splitter keeps only one frame live, so peak heap growth stays far below the full
+// decode size. A regression to "read all frames into a slice" blows past the threshold.
+func TestCueExtractCUE_StreamingMemoryIsBounded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large-file memory test in -short mode")
+	}
+	// Deliberately NOT parallel: the sampler observes process-global heap.
+
+	tmpDir := t.TempDir()
+	outputDir := filepath.Join(tmpDir, "output")
+
+	const totalSamples = uint64(30_000_000) // ~240 MB decoded (int32, 2ch) if buffered
+
+	flacPath := filepath.Join(tmpDir, "album.flac")
+	generateTestFLAC(t, flacPath, totalSamples)
+
+	cueContent := strings.Join([]string{
+		`PERFORMER "Test Artist"`,
+		`TITLE "Big Album"`,
+		`FILE "album.flac" WAVE`,
+		`  TRACK 01 AUDIO`,
+		`    TITLE "One"`,
+		`    INDEX 01 00:00:00`,
+		`  TRACK 02 AUDIO`,
+		`    TITLE "Two"`,
+		`    INDEX 01 03:11:00`,
+		`  TRACK 03 AUDIO`,
+		`    TITLE "Three"`,
+		`    INDEX 01 06:22:00`,
+	}, "\n") + "\n"
+	cuePath := filepath.Join(tmpDir, "album.cue")
+	require.NoError(t, os.WriteFile(cuePath, []byte(cueContent), 0o600))
+
+	runtime.GC()
+
+	var baseline runtime.MemStats
+
+	runtime.ReadMemStats(&baseline)
+
+	var (
+		mu   sync.Mutex
+		peak = baseline.HeapAlloc
+		stop = make(chan struct{})
+		wg   sync.WaitGroup
+	)
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		var m runtime.MemStats
+
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				runtime.ReadMemStats(&m)
+				mu.Lock()
+				if m.HeapAlloc > peak {
+					peak = m.HeapAlloc
+				}
+				mu.Unlock()
+			}
+		}
+	}()
+
+	xFile := &xtractr.XFile{FilePath: cuePath, OutputDir: outputDir, FileMode: 0o600, DirMode: 0o755}
+	_, files, _, err := xtractr.ExtractCUE(xFile) //nolint:dogsled
+
+	close(stop)
+	wg.Wait()
+
+	require.NoError(t, err, "extracting large CUE+FLAC")
+	require.Len(t, files, 4, "3 tracks + cue sheet")
+
+	mu.Lock()
+	peakDelta := peak - baseline.HeapAlloc
+	mu.Unlock()
+
+	// Streaming peak is a few MB; buffering all frames would be >= ~240 MB. 128 MiB
+	// cleanly separates the two while tolerating GC pacing slack.
+	const maxPeakDelta = uint64(128 << 20)
+
+	t.Logf("peak heap growth during split: %d MiB (limit %d MiB)", peakDelta>>20, maxPeakDelta>>20)
+	assert.Lessf(t, peakDelta, maxPeakDelta,
+		"peak heap growth %d MiB exceeds %d MiB — splitter may be buffering the whole file again",
+		peakDelta>>20, maxPeakDelta>>20)
 }
 
 func TestCueParseCueSheet(t *testing.T) {

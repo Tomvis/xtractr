@@ -458,20 +458,27 @@ func parseCueTime(s string) cueTimestamp {
 }
 
 // splitFLAC splits a FLAC file into individual tracks based on CUE sheet data.
+// Frames are decoded and written to the output tracks in a single streaming pass so
+// only one frame is ever held in memory; the whole (potentially multi-GB, hi-res)
+// file is never buffered. The source file stays open for the duration of the split.
 //
 //nolint:cyclop
 func splitFLAC(xFile *XFile, audioPath string, cue *CueSheet, timestamps []cueTimestamp) (uint64, []string, error) {
-	// Open, parse, and read all frames and metadata from the FLAC file.
-	// We close the stream immediately after reading to release the file handle,
-	// which is important on Windows where open handles block TempDir cleanup.
-	flacMeta, err := readFLACFile(audioPath)
+	file, err := os.Open(audioPath)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("opening flac file: %w", err)
+	}
+	defer file.Close()
+
+	// flac.Parse (not flac.New) so metadata blocks are available; it leaves the
+	// stream positioned at the first audio frame, ready for ParseNext.
+	stream, err := flac.Parse(file)
+	if err != nil {
+		return 0, nil, fmt.Errorf("parsing flac file: %w", err)
 	}
 
-	streamInfo := flacMeta.Info
-	allFrames := flacMeta.Frames
-	pictures := flacMeta.Pictures
+	flacMeta := metadataFromStream(stream)
+	streamInfo := stream.Info
 	sampleRate := streamInfo.SampleRate
 	totalSamples := streamInfo.NSamples
 
@@ -502,8 +509,8 @@ func splitFLAC(xFile *XFile, audioPath string, cue *CueSheet, timestamps []cueTi
 		pictureBytes uint64
 	)
 
-	if len(pictures) > 0 {
-		picturePaths, pictureBytes, err = writePicturesToFiles(xFile.OutputDir, pictures, xFile.FileMode)
+	if len(flacMeta.Pictures) > 0 {
+		picturePaths, pictureBytes, err = writePicturesToFiles(xFile.OutputDir, flacMeta.Pictures, xFile.FileMode)
 		if err != nil {
 			xFile.Debugf("Error writing album art files: %s", err)
 		}
@@ -515,7 +522,7 @@ func splitFLAC(xFile *XFile, audioPath string, cue *CueSheet, timestamps []cueTi
 
 	defer xFile.newProgress(0, 0, len(cue.Tracks)).done()
 
-	totalSize, files, err := writeTracksFLAC(xFile, cue, allFrames, trackStarts, streamInfo, trackEnds, flacMeta)
+	totalSize, files, err := streamTracksFLAC(xFile, cue, stream, streamInfo, trackStarts, trackEnds, flacMeta)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -527,91 +534,201 @@ func splitFLAC(xFile *XFile, audioPath string, cue *CueSheet, timestamps []cueTi
 	return totalSize, files, nil
 }
 
-func writeTracksFLAC(
+// flacTrackEncoder holds the open output encoder and file for the track currently
+// being written during a streaming split.
+type flacTrackEncoder struct {
+	enc     *flac.Encoder
+	outFile *os.File
+	path    string
+	number  int
+}
+
+// streamTracksFLAC reads the source FLAC frame-by-frame and writes each frame (clipped
+// at sample boundaries) to the matching output track, opening and closing one track
+// encoder at a time as it crosses CUE boundaries. Peak memory is one decoded frame,
+// not the whole file.
+//
+//nolint:cyclop,gocognit,funlen // a single-pass boundary walk; splitting it hides the logic.
+func streamTracksFLAC(
 	xFile *XFile,
 	cue *CueSheet,
-	allFrames []flacFrame,
-	trackStarts []uint64,
+	stream *flac.Stream,
 	streamInfo *meta.StreamInfo,
-	trackEnds []uint64,
+	trackStarts, trackEnds []uint64,
 	flacMeta *flacMetadata,
 ) (uint64, []string, error) {
 	var (
 		totalSize uint64
 		files     = make([]string, 0, len(cue.Tracks))
+		cur       *flacTrackEncoder
 	)
 
-	// Split frames into tracks.
-	for trackIdx := range cue.Tracks {
-		startSample := trackStarts[trackIdx]
-
-		endSample := trackEnds[trackIdx]
-		if endSample <= startSample {
-			continue
-		}
-
-		track := &cue.Tracks[trackIdx]
-		outputName := formatTrackFilename(track)
-		outputPath := filepath.Join(xFile.OutputDir, outputName)
+	openTrack := func(idx int) error {
+		track := &cue.Tracks[idx]
+		outputPath := filepath.Join(xFile.OutputDir, formatTrackFilename(track))
 		blocks := buildTrackMetadataBlocks(cue, track, flacMeta)
 
-		size, err := writeTrackFLAC(outputPath, streamInfo, allFrames, startSample, endSample, xFile.FileMode, blocks)
-		if err != nil {
-			return totalSize, files, fmt.Errorf("writing track %d: %w", track.Number, err)
+		// Mirror writeTrackFLAC's StreamInfo: FrameSize 0 (encoder does not track it);
+		// NSamples from CUE math (the encoder does not recompute it on Close).
+		trackInfo := &meta.StreamInfo{
+			BlockSizeMin:  streamInfo.BlockSizeMin,
+			BlockSizeMax:  streamInfo.BlockSizeMax,
+			FrameSizeMin:  0,
+			FrameSizeMax:  0,
+			SampleRate:    streamInfo.SampleRate,
+			NChannels:     streamInfo.NChannels,
+			BitsPerSample: streamInfo.BitsPerSample,
+			NSamples:      trackEnds[idx] - trackStarts[idx],
 		}
 
-		totalSize += size
+		outFile, err := os.OpenFile(outputPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, xFile.FileMode)
+		if err != nil {
+			return fmt.Errorf("creating output flac file: %w", err)
+		}
 
-		files = append(files, outputPath)
-		xFile.Debugf("Wrote track %d: %s (%d bytes)", track.Number, outputPath, size)
+		enc, err := flac.NewEncoder(outFile, trackInfo, blocks...)
+		if err != nil {
+			_ = outFile.Close()
+			return fmt.Errorf("creating flac encoder: %w", err)
+		}
+
+		cur = &flacTrackEncoder{enc: enc, outFile: outFile, path: outputPath, number: track.Number}
+
+		return nil
+	}
+
+	closeTrack := func() error {
+		if cur == nil {
+			return nil
+		}
+
+		done := cur
+		cur = nil
+
+		// enc.Close() also closes the underlying file via io.Closer.
+		if err := done.enc.Close(); err != nil {
+			return fmt.Errorf("closing flac encoder: %w", err)
+		}
+
+		stat, err := os.Stat(done.path)
+		if err != nil {
+			return fmt.Errorf("stat output file: %w", err)
+		}
+
+		totalSize += uint64(stat.Size())
+		files = append(files, done.path)
+		xFile.Debugf("Wrote track %d: %s (%d bytes)", done.number, done.path, stat.Size())
+
+		return nil
+	}
+
+	trackIdx := 0
+
+	var samplePos uint64
+
+	for {
+		parsed, err := stream.ParseNext()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			_ = closeTrack()
+			return totalSize, files, fmt.Errorf("parsing flac frame: %w", err)
+		}
+
+		frameStart := samplePos
+		frameEnd := samplePos + uint64(parsed.Subframes[0].NSamples)
+		samplePos = frameEnd
+
+		// Feed this frame to every track it overlaps (a frame can straddle a boundary).
+		for trackIdx < len(cue.Tracks) {
+			tStart := trackStarts[trackIdx]
+			tEnd := trackEnds[trackIdx]
+
+			// Skip zero-length tracks.
+			if tEnd <= tStart {
+				if cerr := closeTrack(); cerr != nil {
+					return totalSize, files, cerr
+				}
+
+				trackIdx++
+
+				continue
+			}
+
+			// Frame ends before this track begins (pre-gap/lead-in): drop it, get next frame.
+			if frameEnd <= tStart {
+				break
+			}
+
+			// Frame begins at/after this track's end: track is finished, advance.
+			if frameStart >= tEnd {
+				if cerr := closeTrack(); cerr != nil {
+					return totalSize, files, cerr
+				}
+
+				trackIdx++
+
+				continue
+			}
+
+			// Overlap with the current track: ensure its encoder is open.
+			if cur == nil {
+				if oerr := openTrack(trackIdx); oerr != nil {
+					return totalSize, files, oerr
+				}
+			}
+
+			clipStart := max(frameStart, tStart)
+			clipEnd := min(frameEnd, tEnd)
+
+			if samplesToTake := int(clipEnd - clipStart); samplesToTake > 0 {
+				outFrame := buildOutputFrame(parsed, int(clipStart-frameStart), samplesToTake)
+				if werr := cur.enc.WriteFrame(outFrame); werr != nil {
+					_ = closeTrack()
+					return totalSize, files, fmt.Errorf("writing flac frame: %w", werr)
+				}
+			}
+
+			// Frame extends past this track: close it and feed the remainder to the next track.
+			if frameEnd > tEnd {
+				if cerr := closeTrack(); cerr != nil {
+					return totalSize, files, cerr
+				}
+
+				trackIdx++
+
+				continue
+			}
+
+			// Frame fully consumed within this track.
+			break
+		}
+	}
+
+	// Flush the final open track.
+	if cerr := closeTrack(); cerr != nil {
+		return totalSize, files, cerr
 	}
 
 	return totalSize, files, nil
 }
 
-// flacFrame holds a parsed frame along with its sample position.
-type flacFrame struct {
-	frame       *frame.Frame
-	sampleStart uint64
-	sampleEnd   uint64
-}
-
 // flacMetadata holds metadata read from a FLAC file for use when splitting by CUE.
 type flacMetadata struct {
 	Info          *meta.StreamInfo
-	Frames        []flacFrame
 	Pictures      []*meta.Picture
 	VorbisComment *meta.VorbisComment // source tags to merge into each track (GENRE, DATE, etc.)
 	OtherBlocks   []*meta.Block       // Application, CueSheet — copied into each track
 }
 
-// readFLACFile opens a FLAC file, parses metadata and all frames, and closes the file.
-// It returns stream info, frames, all pictures, the source VorbisComment (for tag merging),
-// and Application/CueSheet blocks to copy into each split track.
-// We use flac.Parse (not flac.New) so metadata blocks are available.
-// We open and close the os.File ourselves so the underlying file handle is released
-// (important on Windows where open handles block TempDir cleanup).
-func readFLACFile(audioPath string) (*flacMetadata, error) { //nolint:cyclop // it could be worse.
-	file, err := os.Open(audioPath)
-	if err != nil {
-		return nil, fmt.Errorf("opening flac file: %w", err)
-	}
-	defer file.Close()
-
-	stream, err := flac.Parse(file)
-	if err != nil {
-		return nil, fmt.Errorf("parsing flac file: %w", err)
-	}
-
-	frames, err := readAllFrames(stream)
-	if err != nil {
-		return nil, err
-	}
-
-	flacMeta := &flacMetadata{
-		Info:   stream.Info,
-		Frames: frames,
-	}
+// metadataFromStream collects the metadata blocks we copy into split tracks (pictures,
+// the source VorbisComment for tag merging, and Application/CueSheet blocks) from an
+// already-parsed FLAC stream. Audio frames are NOT read here; the caller streams them
+// with stream.ParseNext so the file is never fully buffered in memory.
+func metadataFromStream(stream *flac.Stream) *flacMetadata {
+	flacMeta := &flacMetadata{Info: stream.Info}
 
 	for _, blk := range stream.Blocks {
 		switch blk.Type { //nolint:exhaustive // we do not need them all here.
@@ -631,7 +748,7 @@ func readFLACFile(audioPath string) (*flacMetadata, error) { //nolint:cyclop // 
 		}
 	}
 
-	return flacMeta, nil
+	return flacMeta
 }
 
 // vorbisTagsFromCUE are tag keys we set from the CUE sheet; we do not overwrite these from source.
@@ -825,117 +942,6 @@ func copyCueToOutput(srcPath, destPath string, fileMode os.FileMode) error {
 	}
 
 	return nil
-}
-
-// readAllFrames reads all audio frames from a FLAC stream.
-func readAllFrames(stream *flac.Stream) ([]flacFrame, error) {
-	var (
-		frames    []flacFrame
-		samplePos uint64
-	)
-
-	for {
-		parsed, err := stream.ParseNext()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-
-		if err != nil {
-			return nil, fmt.Errorf("parsing flac frame: %w", err)
-		}
-
-		nsamples := uint64(parsed.Subframes[0].NSamples)
-		frames = append(frames, flacFrame{
-			frame:       parsed,
-			sampleStart: samplePos,
-			sampleEnd:   samplePos + nsamples,
-		})
-		samplePos += nsamples
-	}
-
-	return frames, nil
-}
-
-// writeTrackFLAC writes a subset of FLAC frames to a new FLAC file for a single track.
-// Frames are split at sample boundaries when they span track boundaries.
-// If cue and track are non-nil, a VorbisComment metadata block is written with ALBUM (from cue Title),
-// ARTIST (from track Performer or cue Performer), TITLE (track title),
-// and TRACKNUMBER so Lidarr and others can identify the file.
-func writeTrackFLAC( //nolint:funlen
-	outputPath string,
-	srcInfo *meta.StreamInfo,
-	allFrames []flacFrame,
-	startSample, endSample uint64,
-	fileMode os.FileMode,
-	blocks []*meta.Block,
-) (uint64, error) {
-	outFile, err := os.OpenFile(outputPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, fileMode)
-	if err != nil {
-		return 0, fmt.Errorf("creating output flac file: %w", err)
-	}
-
-	// Create a new StreamInfo for this track.
-	// BlockSizeMin/Max will be rewritten by the encoder on Close().
-	// FrameSizeMin/Max are set to 0 (unknown) because the mewkiz encoder does
-	// not track frame sizes and will not update them on Close(); copying the
-	// source values would be wrong after splitting frames at track boundaries.
-	trackInfo := &meta.StreamInfo{
-		BlockSizeMin:  srcInfo.BlockSizeMin,
-		BlockSizeMax:  srcInfo.BlockSizeMax,
-		FrameSizeMin:  0,
-		FrameSizeMax:  0,
-		SampleRate:    srcInfo.SampleRate,
-		NChannels:     srcInfo.NChannels,
-		BitsPerSample: srcInfo.BitsPerSample,
-		NSamples:      endSample - startSample,
-	}
-
-	enc, err := flac.NewEncoder(outFile, trackInfo, blocks...)
-	if err != nil {
-		_ = outFile.Close()
-		return 0, fmt.Errorf("creating flac encoder: %w", err)
-	}
-
-	for idx := range allFrames {
-		srcFrame := &allFrames[idx]
-		// Skip frames entirely outside the track range.
-		if srcFrame.sampleEnd <= startSample || srcFrame.sampleStart >= endSample {
-			continue
-		}
-
-		// Determine which portion of this frame belongs to the track.
-		clipStart := max(srcFrame.sampleStart, startSample)
-		clipEnd := min(srcFrame.sampleEnd, endSample)
-
-		offsetInFrame := int(clipStart - srcFrame.sampleStart)
-		samplesToTake := int(clipEnd - clipStart)
-
-		if samplesToTake <= 0 {
-			continue
-		}
-
-		outFrame := buildOutputFrame(srcFrame.frame, offsetInFrame, samplesToTake)
-
-		err = enc.WriteFrame(outFrame)
-		if err != nil {
-			_ = outFile.Close()
-			return 0, fmt.Errorf("writing flac frame: %w", err)
-		}
-	}
-
-	// enc.Close() also closes the underlying file via io.Closer.
-	err = enc.Close()
-	if err != nil {
-		return 0, fmt.Errorf("closing flac encoder: %w", err)
-	}
-
-	// Stat the file after closing to get the final size.
-	stat, err := os.Stat(outputPath)
-	if err != nil {
-		return 0, fmt.Errorf("stat output file: %w", err)
-	}
-
-	return uint64(stat.Size()), nil
 }
 
 // buildOutputFrame creates a new frame with a subset of samples from the source frame.

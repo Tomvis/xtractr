@@ -659,6 +659,20 @@ func writeTwoTrackAPECue(t *testing.T, dir, apeName, fileLine string) string {
 	return cuePath
 }
 
+// forcePureGoAPESplit pins ExtractCUE to the pure-Go APE splitter for the duration of a
+// test. This fork routes .ape through ffmpeg whenever ffmpeg is installed (tagged FLAC
+// output), so without this the .ape tests below would assert different things depending
+// on the host's PATH -- and the synthetic fixtures are not decodable by ffprobe anyway.
+// Callers must not use t.Parallel(): this mutates package state.
+func forcePureGoAPESplit(t *testing.T) {
+	t.Helper()
+
+	prev := cueUseFFmpegForAPE
+	cueUseFFmpegForAPE = func() bool { return false }
+
+	t.Cleanup(func() { cueUseFFmpegForAPE = prev })
+}
+
 // assertExtractCUEAPE runs ExtractCUE and checks that it produced two parseable .ape tracks
 // plus the copied CUE sheet, and that the archive list references the source CUE and audio file.
 func assertExtractCUEAPE(t *testing.T, cuePath, audioPath, outDir string) {
@@ -687,7 +701,7 @@ func assertExtractCUEAPE(t *testing.T, cuePath, audioPath, outDir string) {
 // TestExtractCUEAPEEndToEnd exercises the public ExtractCUE entrypoint dispatching to splitAPE
 // when the CUE FILE line points directly at an existing .ape file.
 func TestExtractCUEAPEEndToEnd(t *testing.T) {
-	t.Parallel()
+	forcePureGoAPESplit(t)
 
 	dir := t.TempDir()
 	cuePath := writeTwoTrackAPECue(t, dir, "album.ape", "album.ape")
@@ -698,7 +712,7 @@ func TestExtractCUEAPEEndToEnd(t *testing.T) {
 // TestExtractCUEAPEWavFallback covers resolveCueAudioPath: the CUE references album.wav but
 // only album.ape exists on disk, so the .wav -> .ape fallback must find it.
 func TestExtractCUEAPEWavFallback(t *testing.T) {
-	t.Parallel()
+	forcePureGoAPESplit(t)
 
 	dir := t.TempDir()
 	cuePath := writeTwoTrackAPECue(t, dir, "album.ape", "album.wav")
@@ -710,12 +724,36 @@ func TestExtractCUEAPEWavFallback(t *testing.T) {
 // a file that does not exist (and is not a .wav), so resolution falls back to the .ape that
 // shares the CUE file's base name (album.cue -> album.ape).
 func TestExtractCUEAPEBasenameFallback(t *testing.T) {
-	t.Parallel()
+	forcePureGoAPESplit(t)
 
 	dir := t.TempDir()
 	cuePath := writeTwoTrackAPECue(t, dir, "album.ape", "totally-different-name.cda")
 
 	assertExtractCUEAPE(t, cuePath, filepath.Join(dir, "album.ape"), filepath.Join(dir, "output"))
+}
+
+// TestExtractCUEAPEPrefersFFmpeg locks in this fork's dispatch: when ffmpeg is available,
+// an .ape CUE source must NOT fall into the pure-Go splitter, because that one emits
+// untagged .ape tracks and this fork exists to produce tagged FLAC. The synthetic fixture
+// is not real Monkey's Audio, so ffprobe rejects it -- the point is only that the failure
+// comes from the ffmpeg path and that no .ape tracks were written.
+func TestExtractCUEAPEPrefersFFmpeg(t *testing.T) {
+	prev := cueUseFFmpegForAPE
+	cueUseFFmpegForAPE = func() bool { return true }
+
+	t.Cleanup(func() { cueUseFFmpegForAPE = prev })
+
+	dir := t.TempDir()
+	cuePath := writeTwoTrackAPECue(t, dir, "album.ape", "album.ape")
+	outDir := filepath.Join(dir, "output")
+
+	_, files, _, err := ExtractCUE(&XFile{FilePath: cuePath, OutputDir: outDir, FileMode: 0o600, DirMode: 0o755})
+	require.Error(t, err, "synthetic APE is not decodable, so the ffmpeg path must fail")
+	assert.Empty(t, files)
+
+	for _, name := range []string{"01 - First Song.ape", "02 - Second Song.ape"} {
+		assert.NoFileExists(t, filepath.Join(outDir, name), "pure-Go splitter must not run when ffmpeg is preferred")
+	}
 }
 
 // TestReadAPESeekTableRejectsHugeTotalFrames verifies the seek-table reader refuses a crafted

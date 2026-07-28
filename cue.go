@@ -24,6 +24,13 @@ import (
 // that ExtractCUE can split. FLAC uses the pure-Go path; the rest use ffmpeg.
 var supportedCueAudioExts = []string{".flac", ".ape", ".wv", ".m4a", ".wav"}
 
+// cueUseFFmpegForAPE reports whether an .ape CUE source should go through the ffmpeg
+// path (per-track FLAC, fully tagged, with cover art) instead of the pure-Go APE
+// splitter (per-track .ape carrying no APEv2 footer at all). Tagged output is the
+// point of this fork, so ffmpeg wins whenever it is installed. It is a variable so
+// tests can pin either branch without depending on the host's PATH.
+var cueUseFFmpegForAPE = ffmpegAvailable
+
 // isSupportedCueAudioExt reports whether ext (lowercase, with leading dot) is splittable.
 func isSupportedCueAudioExt(ext string) bool {
 	for _, e := range supportedCueAudioExts {
@@ -132,10 +139,12 @@ func ExtractCUE(xFile *XFile) (size uint64, files, archives []string, err error)
 	switch {
 	case ext == ".flac":
 		size, files, err = splitFLAC(xFile, audioPath, cue, timestamps)
-	case ext == ".ape":
-		// Native, pure-Go Monkey's Audio decoder (upstream); no ffmpeg required.
+	case ext == ".ape" && !cueUseFFmpegForAPE():
+		// Native, pure-Go Monkey's Audio decoder (upstream). Only reached when ffmpeg is
+		// missing: it emits untagged .ape tracks, where the ffmpeg path below emits tagged
+		// FLAC with cover art. Degraded output beats no output.
 		size, files, err = splitAPE(xFile, audioPath, cue, timestamps)
-	case isSupportedCueAudioExt(ext): // .wv/.m4a/.wav -> ffmpeg path
+	case isSupportedCueAudioExt(ext): // .ape/.wv/.m4a/.wav -> ffmpeg path
 		size, files, err = splitViaFFmpeg(xFile, audioPath, cue, timestamps)
 	default:
 		return 0, nil, nil, fmt.Errorf("%w: %s", ErrUnsupportedAudio, ext)

@@ -257,7 +257,8 @@ func splitViaFFmpeg(xFile *XFile, audioPath string, cue *CueSheet, timestamps []
 
 	for i := range cue.Tracks {
 		track := &cue.Tracks[i]
-		outName := formatTrackFilename(track) // shared with the FLAC path
+		// Shared with the FLAC path; the ffmpeg path always re-encodes to FLAC.
+		outName := formatTrackFilename(track, ".flac")
 		outPath := filepath.Join(xFile.OutputDir, outName)
 
 		if err := cutTrackFLAC(audioPath, outPath, starts[i], durs[i]); err != nil {

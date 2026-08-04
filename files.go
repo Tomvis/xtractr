@@ -3,6 +3,7 @@ package xtractr
 /* Code to find, write, move and delete files. */
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -163,6 +164,13 @@ type Exclude []string
 func (x *XFile) Debugf(format string, v ...any) {
 	if x.log != nil {
 		x.log.Debugf(format, v...)
+	}
+}
+
+// Printf calls the print method on the logger if it's not nil.
+func (x *XFile) Printf(format string, v ...any) {
+	if x.log != nil {
+		x.log.Printf(format, v...)
 	}
 }
 
@@ -566,13 +574,13 @@ func truncateToBytes(str string, maxBytes int) string {
 		return str
 	}
 
-	bytes := []byte(str)
-	for len(bytes) > maxBytes {
-		_, size := utf8.DecodeLastRune(bytes)
-		bytes = bytes[:len(bytes)-size]
+	raw := []byte(str)
+	for len(raw) > maxBytes {
+		_, size := utf8.DecodeLastRune(raw)
+		raw = raw[:len(raw)-size]
 	}
 
-	return string(bytes)
+	return string(raw)
 }
 
 // openFile opens path with the given flags and mode. If the path exceeds
@@ -610,6 +618,9 @@ type file struct {
 	DirMode  os.FileMode
 	Mtime    time.Time
 	Atime    time.Time
+	// Linkname is an explicit symlink target when the archive format stores it
+	// outside the file payload (e.g. RAR5 redirection records).
+	Linkname string
 }
 
 // Rename is an attempt to deal with "invalid cross link device" on weird file systems.
@@ -804,6 +815,18 @@ func (x *XFile) writeFile(file *file, parallel bool) (uint64, error) {
 		return 0, fmt.Errorf("writing archived file '%s' parent folder: %w", filepath.Base(file.Path), err)
 	}
 
+	// ZIP/RAR/7z (and similar) store symlink targets as the member payload with
+	// ModeSymlink set. Writing them as regular files leaves a text stub instead
+	// of a real link — the same class of bug as tar (#153), different symptom.
+	if file.FileMode&os.ModeSymlink != 0 {
+		err := x.writeSymlink(file)
+		if errors.Is(err, errSkipEntry) {
+			return 0, nil
+		}
+
+		return 0, err
+	}
+
 	fout, pathUsed, err := openFile(file.Path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, x.safeFileMode(file.FileMode))
 	if err != nil {
 		return 0, err
@@ -828,6 +851,45 @@ func (x *XFile) writeFile(file *file, parallel bool) (uint64, error) {
 	return uint64(size), nil
 }
 
+// maxSymlinkTarget is the maximum bytes allowed for a symlink target read from
+// an archive member payload. Prevents a ModeSymlink entry with a huge payload
+// from exhausting memory.
+const maxSymlinkTarget = 8 * 1024
+
+// writeSymlink reads a symlink target and creates the link at file.Path.
+// Prefer file.Linkname when set (RAR5 redirections); otherwise read file.Data
+// (ZIP/7z store the target as the member payload).
+func (x *XFile) writeSymlink(file *file) error {
+	linkName := file.Linkname
+	if linkName == "" && file.Data != nil {
+		limited := io.LimitReader(file.Data, maxSymlinkTarget+1)
+
+		raw, err := io.ReadAll(limited)
+		if err != nil {
+			return fmt.Errorf("reading archived symlink '%s' target: %w", file.Path, err)
+		}
+
+		if len(raw) > maxSymlinkTarget {
+			return fmt.Errorf("%s: %w: %s", x.FilePath, ErrSymlinkTooLong, file.Path)
+		}
+
+		linkName = strings.TrimRight(string(raw), "\x00")
+	}
+
+	if linkName == "" {
+		x.Printf("Warning: skipping symlink with empty target: %s", file.Path)
+
+		return errSkipEntry
+	}
+
+	err := os.Remove(file.Path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s: removing existing path for symlink: %w: %s", x.FilePath, err, file.Path)
+	}
+
+	return x.createSymlink(file.Path, linkName)
+}
+
 // clean returns an absolute path for a file inside the OutputDir.
 // If trim length is > 0, then the suffixes are trimmed, and filepath removed.
 func (x *XFile) clean(filePath string, trim ...string) string {
@@ -839,4 +901,98 @@ func (x *XFile) clean(filePath string, trim ...string) string {
 	}
 
 	return filepath.Clean(filepath.Join(x.OutputDir, filePath))
+}
+
+// pathWithinOutput reports whether path is OutputDir or a descendant of it.
+// Uses filepath.Rel so sibling-prefix tricks like OutputDir=/tmp/out and
+// path=/tmp/out_evil fail (unlike strings.HasPrefix).
+func (x *XFile) pathWithinOutput(path string) bool {
+	outputDir := filepath.Clean(x.OutputDir)
+	cleanPath := filepath.Clean(path)
+
+	rel, err := filepath.Rel(outputDir, cleanPath)
+	if err != nil {
+		return false
+	}
+
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// resolveLinkTarget returns the cleaned filesystem path a link would resolve to.
+func resolveLinkTarget(linkPath, linkName string) string {
+	if filepath.IsAbs(linkName) {
+		return filepath.Clean(linkName)
+	}
+
+	return filepath.Clean(filepath.Join(filepath.Dir(linkPath), linkName))
+}
+
+// ensureLinkWithinOutput rejects symlink targets that escape OutputDir.
+func (x *XFile) ensureLinkWithinOutput(linkPath, linkName string) error {
+	resolved := resolveLinkTarget(linkPath, linkName)
+	if !x.pathWithinOutput(resolved) {
+		return fmt.Errorf("%s: %w: %s (from: %s)", x.FilePath, ErrInvalidPath, resolved, linkName)
+	}
+
+	return nil
+}
+
+func (x *XFile) createSymlink(path, linkName string) error {
+	if linkName == "" {
+		x.Printf("Warning: skipping symlink with empty target: %s", path)
+
+		return errSkipEntry
+	}
+
+	err := x.ensureLinkWithinOutput(path, linkName)
+	if err != nil {
+		return err
+	}
+
+	x.Debugf("Writing archived symlink: %s -> %s", path, linkName)
+
+	err = os.Symlink(linkName, path)
+	if err != nil {
+		return fmt.Errorf("%s: creating symlink: %w: %s -> %s", x.FilePath, err, path, linkName)
+	}
+
+	return nil
+}
+
+func (x *XFile) createHardLink(path, linkName string) error {
+	if linkName == "" {
+		x.Printf("Warning: skipping hard link with empty target: %s", path)
+
+		return errSkipEntry
+	}
+
+	// Hard-link names are archive member paths, not arbitrary filesystem paths.
+	if filepath.IsAbs(linkName) {
+		return fmt.Errorf("%s: %w: %s", x.FilePath, ErrInvalidPath, linkName)
+	}
+
+	target := x.clean(linkName)
+	if !x.pathWithinOutput(target) {
+		return fmt.Errorf("%s: %w: %s (from: %s)", x.FilePath, ErrInvalidPath, target, linkName)
+	}
+
+	x.Debugf("Writing archived hard link: %s => %s", path, target)
+
+	err := os.Link(target, path)
+	if err == nil {
+		return nil
+	}
+
+	linkErr := err
+
+	rel, relErr := filepath.Rel(filepath.Dir(path), target)
+	if relErr != nil {
+		return fmt.Errorf("%s: creating hard link: %w: %s => %s", x.FilePath, linkErr, path, target)
+	}
+
+	// Fall back to a relative symlink when hard links are unavailable
+	// (e.g. target not extracted yet, or the filesystem does not support them).
+	x.Debugf("Hard link failed (%v); falling back to symlink: %s -> %s", linkErr, path, rel)
+
+	return x.createSymlink(path, rel)
 }

@@ -377,11 +377,18 @@ func resolveCueAudioPath(cueDir, cueFile, cueFilePath string) (string, error) {
 	// 2) FILE basename + each supported extension.
 	fileBase := strings.TrimSuffix(cueFile, filepath.Ext(cueFile))
 	// 3) CUE basename + each supported extension (fallback for name mismatches).
-	cueBase := strings.TrimSuffix(filepath.Base(cueFilePath), filepath.Ext(cueFilePath))
+	cueBase := cueBaseName(cueFilePath)
 
 	for _, base := range []string{fileBase, cueBase} {
 		for _, ext := range supportedCueAudioExts {
 			candidate := filepath.Join(cueDir, base+ext)
+			// fileBase is derived from the FILE line, so the containment check
+			// above does not cover every path this loop can build. Skip rather
+			// than fail: a stray candidate is not the sheet's real reference.
+			if !pathWithin(cueDir, candidate) {
+				continue
+			}
+
 			if _, err := os.Stat(candidate); err == nil {
 				return candidate, nil
 			}

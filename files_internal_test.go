@@ -1,8 +1,10 @@
 package xtractr
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -152,10 +154,10 @@ func TestMkDirRefusesPreExistingSymlinkDir(t *testing.T) {
 	assert.Equal(t, oldTime.Unix(), info.ModTime().Unix(), "rejected path must not be Chtimes'd")
 }
 
-// TestOpenFlagsForExtractNameTooLongUsesExcl is the Copilot finding: Lstat of a
-// too-long name fails with ENAMETOOLONG, which used to fall through to O_TRUNC.
-// openFile then truncates and OpenFile-follows a raced symlink at the short name.
-func TestOpenFlagsForExtractNameTooLongUsesExcl(t *testing.T) {
+// TestOpenExtractFileNameTooLongCreatesShortName is the Copilot finding: Lstat of a
+// too-long name used to fall through to O_TRUNC. The exclusive-create path now
+// retries the truncated name with O_EXCL / CREATE_NEW instead.
+func TestOpenExtractFileNameTooLongCreatesShortName(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
@@ -166,10 +168,15 @@ func TestOpenFlagsForExtractNameTooLongUsesExcl(t *testing.T) {
 		t.Skipf("filesystem accepted a 300-byte filename (got %v)", err)
 	}
 
-	flags, usedPath, err := openFlagsForExtract(long)
+	fout, usedPath, err := openExtractFile(long, 0o600)
 	require.NoError(t, err)
-	assert.Equal(t, os.O_RDWR|os.O_CREATE|os.O_EXCL, flags)
 	assert.LessOrEqual(t, len(filepath.Base(usedPath)), nameMax)
+	require.NoError(t, fout.Close())
+
+	info, err := os.Lstat(usedPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0), info.Mode()&os.ModeSymlink)
+	assert.True(t, info.Mode().IsRegular())
 }
 
 // TestWriteExtractFileNameTooLongDoesNotFollowTruncatedSymlink plants a symlink
@@ -203,4 +210,465 @@ func TestWriteExtractFileNameTooLongDoesNotFollowTruncatedSymlink(t *testing.T) 
 	got, err := os.ReadFile(victim)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("secret"), got, "must not follow symlink at truncated path")
+}
+
+func TestOpenExtractFileReplacesSymlink(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+
+	err := os.Symlink("target", filepath.Join(tmp, "symlink-probe"))
+	if err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	victim := filepath.Join(tmp, "victim")
+	require.NoError(t, os.WriteFile(victim, []byte("secret"), 0o600))
+
+	dest := filepath.Join(tmp, "track.flac")
+	require.NoError(t, os.Symlink(victim, dest))
+
+	fout, usedPath, err := openExtractFile(dest, 0o600)
+	require.NoError(t, err)
+	assert.Equal(t, dest, usedPath)
+
+	_, err = fout.WriteString("track")
+	require.NoError(t, err)
+	require.NoError(t, fout.Close())
+
+	got, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("secret"), got, "must not follow destPath symlink")
+
+	written, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("track"), written)
+
+	info, err := os.Lstat(dest)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0), info.Mode()&os.ModeSymlink)
+}
+
+func TestOpenExtractFileReplacesDirectorySymlink(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+
+	err := os.Symlink("target", filepath.Join(tmp, "symlink-probe"))
+	if err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	dir := filepath.Join(tmp, "dir")
+	require.NoError(t, os.Mkdir(dir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "inside"), []byte("keep"), 0o600))
+
+	dest := filepath.Join(tmp, "member")
+	require.NoError(t, os.Symlink(dir, dest))
+
+	fout, usedPath, err := openExtractFile(dest, 0o600)
+	require.NoError(t, err)
+	assert.Equal(t, dest, usedPath)
+
+	_, err = fout.WriteString("payload")
+	require.NoError(t, err)
+	require.NoError(t, fout.Close())
+
+	got, err := os.ReadFile(filepath.Join(dir, "inside"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("keep"), got, "must not follow a directory symlink/junction")
+
+	written, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("payload"), written)
+
+	info, err := os.Lstat(dest)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0), info.Mode()&os.ModeSymlink)
+	assert.True(t, info.Mode().IsRegular())
+}
+
+func TestOpenExtractFileRefusesDirectory(t *testing.T) {
+	t.Parallel()
+
+	dest := t.TempDir()
+	marker := filepath.Join(dest, "keep")
+	require.NoError(t, os.WriteFile(marker, []byte("keep"), 0o600))
+
+	_, _, err := openExtractFile(dest, 0o600)
+	require.Error(t, err)
+
+	got, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("keep"), got)
+}
+
+func TestOpenFileNoFollowDoesNotFollowSymlink(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+
+	err := os.Symlink("target", filepath.Join(tmp, "symlink-probe"))
+	if err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	victim := filepath.Join(tmp, "victim")
+	require.NoError(t, os.WriteFile(victim, []byte("secret"), 0o600))
+
+	dest := filepath.Join(tmp, "track.flac")
+	require.NoError(t, os.Symlink(victim, dest))
+
+	_, err = openFileNoFollow(dest, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errExtractSymlink)
+
+	got, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("secret"), got, "O_TRUNC must not follow a final-component symlink")
+
+	info, err := os.Lstat(dest)
+	require.NoError(t, err)
+	assert.NotEqual(t, os.FileMode(0), info.Mode()&os.ModeSymlink, "symlink should still be present")
+}
+
+func TestOpenExtractFileTruncatesRegularFile(t *testing.T) {
+	t.Parallel()
+
+	dest := filepath.Join(t.TempDir(), "track.flac")
+	require.NoError(t, os.WriteFile(dest, []byte("old payload"), 0o600))
+
+	fout, usedPath, err := openExtractFile(dest, 0o600)
+	require.NoError(t, err)
+	assert.Equal(t, dest, usedPath)
+
+	_, err = fout.WriteString("new")
+	require.NoError(t, err)
+	require.NoError(t, fout.Close())
+
+	got, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("new"), got)
+}
+
+// TestOpenExtractFileRetriesWhenOpenSeesSymlink is the qwen finding: Lstat (or
+// exclusive-create EEXIST) can observe a regular file while the no-follow open
+// of that name sees a symlink planted in the window. The retry must unlink and
+// exclusive-create, never write through the link.
+func TestOpenExtractFileRetriesWhenOpenSeesSymlink(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+
+	err := os.Symlink("target", filepath.Join(tmp, "symlink-probe"))
+	if err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	victim := filepath.Join(tmp, "victim")
+	require.NoError(t, os.WriteFile(victim, []byte("secret"), 0o600))
+
+	dest := filepath.Join(tmp, "track.flac")
+	require.NoError(t, os.WriteFile(dest, []byte("old"), 0o600))
+
+	calls := 0
+	opener := func(path string, flags int, mode os.FileMode) (*os.File, error) {
+		calls++
+
+		if flags&os.O_EXCL != 0 && calls == 1 {
+			return nil, os.ErrExist
+		}
+
+		if flags&os.O_EXCL == 0 && calls == 2 {
+			require.NoError(t, os.Remove(dest))
+			require.NoError(t, os.Symlink(victim, dest))
+
+			return nil, errExtractSymlink
+		}
+
+		return openFileNoFollow(path, flags, mode)
+	}
+
+	fout, usedPath, err := openExtractFileWith(opener, dest, 0o600)
+	require.NoError(t, err)
+	assert.Equal(t, dest, usedPath)
+	assert.GreaterOrEqual(t, calls, 3)
+
+	_, err = fout.WriteString("track")
+	require.NoError(t, err)
+	require.NoError(t, fout.Close())
+
+	got, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("secret"), got, "retry must not follow the planted symlink")
+
+	written, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("track"), written)
+
+	info, err := os.Lstat(dest)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0), info.Mode()&os.ModeSymlink)
+}
+
+func TestOpenExtractFileRetriesWhenFileVanishes(t *testing.T) {
+	t.Parallel()
+
+	dest := filepath.Join(t.TempDir(), "track.flac")
+	calls := 0
+	opener := func(path string, flags int, mode os.FileMode) (*os.File, error) {
+		calls++
+
+		if flags&os.O_EXCL != 0 && calls == 1 {
+			return nil, os.ErrExist
+		}
+
+		if flags&os.O_EXCL == 0 && calls == 2 {
+			return nil, os.ErrNotExist
+		}
+
+		return openFileNoFollow(path, flags, mode)
+	}
+
+	fout, usedPath, err := openExtractFileWith(opener, dest, 0o600)
+	require.NoError(t, err)
+	assert.Equal(t, dest, usedPath)
+	assert.GreaterOrEqual(t, calls, 3)
+	require.NoError(t, fout.Close())
+
+	info, err := os.Lstat(dest)
+	require.NoError(t, err)
+	assert.True(t, info.Mode().IsRegular())
+}
+
+func TestOpenExtractFileConflictExhaustion(t *testing.T) {
+	t.Parallel()
+
+	dest := filepath.Join(t.TempDir(), "track.flac")
+	opener := func(string, int, os.FileMode) (*os.File, error) {
+		return nil, errExtractSymlink
+	}
+
+	_, _, err := openExtractFileWith(opener, dest, 0o600)
+	require.ErrorIs(t, err, errExtractConflict)
+	require.ErrorIs(t, err, errExtractSymlink)
+}
+
+func TestOpenExtractFileNotExistExhaustion(t *testing.T) {
+	t.Parallel()
+
+	dest := filepath.Join(t.TempDir(), "track.flac")
+	opener := func(string, int, os.FileMode) (*os.File, error) {
+		return nil, os.ErrNotExist
+	}
+
+	_, _, err := openExtractFileWith(opener, dest, 0o600)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.NotErrorIs(t, err, errExtractConflict)
+}
+
+func TestMoveFilesUsesProvidedDirMode(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permission bits")
+	}
+
+	fromDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(fromDir, "a.txt"), []byte("hi"), 0o600))
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	_, err := moveFiles(NoLogger(), 0o700, fromDir, dest, false, "")
+	require.NoError(t, err)
+
+	info, err := os.Stat(dest)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(),
+		"DirMode must reach MkdirAll when the dest does not already exist")
+}
+
+func TestBindMoveFilesUsesXFileDirMode(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permission bits")
+	}
+
+	fromDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(fromDir, "a.txt"), []byte("hi"), 0o600))
+
+	xFile := &XFile{
+		DirMode: 0o700,
+		log:     NoLogger(),
+	}
+	xFile.bindMoveFiles()
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	_, err := xFile.moveFiles(fromDir, dest, false)
+	require.NoError(t, err)
+
+	info, err := os.Stat(dest)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+}
+
+func TestMoveFilesZeroDirModeUsesDefault(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permission bits")
+	}
+
+	fromDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(fromDir, "a.txt"), []byte("hi"), 0o600))
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	_, err := moveFiles(NoLogger(), 0, fromDir, dest, false, "")
+	require.NoError(t, err)
+
+	info, err := os.Stat(dest)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(DefaultDirMode).Perm(), info.Mode().Perm())
+}
+
+func TestSquashRootLeavesSingleFile(t *testing.T) {
+	t.Parallel()
+
+	out := t.TempDir()
+	path := filepath.Join(out, "a.txt")
+	require.NoError(t, os.WriteFile(path, []byte("hi"), 0o600))
+
+	xFile := &XFile{
+		OutputDir:  out,
+		SquashRoot: true,
+		log:        NoLogger(),
+	}
+	xFile.bindMoveFiles()
+
+	got, err := xFile.squashRoot([]string{path})
+	require.NoError(t, err)
+	assert.Equal(t, []string{path}, got)
+
+	_, err = os.Stat(path)
+	require.NoError(t, err, "SquashRoot must not delete a lone extracted file")
+}
+
+func TestSquashRootMovesSingleDirectory(t *testing.T) {
+	t.Parallel()
+
+	out := t.TempDir()
+	nested := filepath.Join(out, "root")
+	require.NoError(t, os.Mkdir(nested, 0o700))
+	inner := filepath.Join(nested, "a.txt")
+	require.NoError(t, os.WriteFile(inner, []byte("hi"), 0o600))
+
+	xFile := &XFile{
+		OutputDir:  out,
+		SquashRoot: true,
+		DirMode:    0o755,
+		log:        NoLogger(),
+	}
+	xFile.bindMoveFiles()
+
+	got, err := xFile.squashRoot([]string{inner})
+	require.NoError(t, err)
+
+	dest := filepath.Join(out, "a.txt")
+	assert.Equal(t, []string{dest}, got)
+	require.FileExists(t, dest)
+
+	_, err = os.Stat(nested)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestMoveFilesDoesNotDeleteSourceFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.txt")
+	require.NoError(t, os.WriteFile(src, []byte("hi"), 0o600))
+
+	got, err := moveFiles(NoLogger(), 0o755, src, dir, false, "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{src}, got.NewFiles)
+	require.FileExists(t, src)
+}
+
+func TestMkDirCountsEachMissingComponent(t *testing.T) {
+	t.Parallel()
+
+	out := t.TempDir()
+	xFile := &XFile{FilePath: "a.zip", OutputDir: out, MaxFiles: 2, DirMode: 0o755}
+	xFile.newProgress(0, 0, 0)
+
+	err := xFile.mkDir(filepath.Join(out, "a", "b", "c"), 0o755, time.Now())
+	require.ErrorIs(t, err, ErrMaxFiles)
+	require.DirExists(t, filepath.Join(out, "a"))
+	require.DirExists(t, filepath.Join(out, "a", "b"))
+	require.NoDirExists(t, filepath.Join(out, "a", "b", "c"))
+}
+
+func TestMkDirExistingFileIsNotDirectory(t *testing.T) {
+	t.Parallel()
+
+	out := t.TempDir()
+	filePath := filepath.Join(out, "notdir")
+	require.NoError(t, os.WriteFile(filePath, []byte("x"), 0o600))
+
+	oldTime := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	require.NoError(t, os.Chtimes(filePath, oldTime, oldTime))
+
+	xFile := &XFile{FilePath: "a.zip", OutputDir: out, DirMode: 0o755}
+	err := xFile.mkDir(filePath, 0o755, time.Now())
+	require.ErrorIs(t, err, errNotDirectory)
+
+	info, err := os.Stat(filePath)
+	require.NoError(t, err)
+	assert.Equal(t, oldTime.Unix(), info.ModTime().Unix(), "rejected file must not be Chtimes'd")
+	assert.False(t, info.IsDir())
+}
+
+func TestCreateSymlinkRemovesWhenMaxFilesExceeded(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	err := os.Symlink("target", filepath.Join(dir, "symlink-probe"))
+	if err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	xFile := &XFile{FilePath: "a.zip", OutputDir: dir, MaxFiles: 1, DirMode: 0o755}
+	xFile.newProgress(0, 0, 0)
+	require.NoError(t, xFile.countExtracted())
+
+	link := filepath.Join(dir, "link")
+	err = xFile.createSymlink(link, "target")
+	require.ErrorIs(t, err, ErrMaxFiles)
+
+	_, statErr := os.Lstat(link)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestCreateHardLinkRemovesWhenMaxFilesExceeded(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "real"), []byte("x"), 0o600))
+
+	xFile := &XFile{FilePath: "a.zip", OutputDir: dir, MaxFiles: 1, DirMode: 0o755}
+	xFile.newProgress(0, 0, 0)
+	require.NoError(t, xFile.countExtracted())
+
+	link := filepath.Join(dir, "link")
+
+	err := xFile.createHardLink(link, "real")
+	if err != nil && !errors.Is(err, ErrMaxFiles) {
+		t.Skipf("hard links and symlink fallback unavailable: %v", err)
+	}
+
+	require.ErrorIs(t, err, ErrMaxFiles)
+
+	_, statErr := os.Lstat(link)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
 }

@@ -28,10 +28,6 @@ linters:
         path: chardet\.go
 
   settings:
-    gomoddirectives:
-      # Temporary until nwaples/rardecode#62 (RAR5 Linkname) merges.
-      replace-allow-list:
-        - github.com/nwaples/rardecode/v2
     gosec:
       excludes:
         - G304
@@ -53,8 +49,6 @@ linters:
         - os.RemoveAll
         - os.Remove
         - os.Chtimes
-        - (io.Closer).Close
-        - (*compress/gzip.Reader).Close
         - (*archive/zip.ReadCloser).Close
         - (*github.com/bodgit/sevenzip.ReadCloser).Close
         - (*github.com/nwaples/rardecode/v2.ReadCloser).Close

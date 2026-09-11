@@ -419,8 +419,15 @@ func splitViaFFmpeg(xFile *XFile, audioPath string, cue *CueSheet, timestamps []
 
 	var (
 		total = coverSize
-		files = make([]string, 0, len(cue.Tracks)+1)
+		// files is what a successful split hands back; written is everything
+		// that is on disk right now, art first, so an abort can take all of it.
+		files   = make([]string, 0, len(cue.Tracks)+1)
+		written = make([]string, 0, len(cue.Tracks)+1)
 	)
+
+	if coverPath != "" {
+		written = append(written, coverPath)
+	}
 
 	for i := range cue.Tracks {
 		track := &cue.Tracks[i]
@@ -436,12 +443,19 @@ func splitViaFFmpeg(xFile *XFile, audioPath string, cue *CueSheet, timestamps []
 		// Shared with the FLAC path; the ffmpeg path always re-encodes to FLAC.
 		outPath, size, err := cut.run(filepath.Join(xFile.OutputDir, formatTrackFilename(track, ".flac")))
 		if err != nil {
-			return total, files, err
+			// cut.run cleaned up the track it was working on; the tracks and art
+			// before it go too. ExtractCUE discards the file list on error, so
+			// anything kept here is a partial album nobody was told about. This
+			// mirrors trackSplitter.removeFiles on the FLAC path.
+			xFile.removeExtractedFiles(written)
+
+			return 0, nil, err
 		}
 
 		total += size
 
 		files = append(files, outPath)
+		written = append(written, outPath)
 		xFile.Debugf("Wrote track %d via ffmpeg: %s", track.Number, outPath)
 	}
 

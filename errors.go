@@ -69,6 +69,26 @@ func IsLimitError(err error) bool {
 		errors.Is(err, ErrArchiveSymlink)
 }
 
+// limitChainError ties an extract cap sentinel back to an error whose chain a
+// third-party library severed by wrapping ours in a type with no Unwrap method.
+// Error() is the library's message verbatim — it already ends in the sentinel's
+// own text — while Unwrap exposes both errors, so errors.Is, and with it
+// IsLimitError, can find the cap again. Built by countedWriteSeeker.capError.
+type limitChainError struct {
+	err   error // the error exactly as the library returned it.
+	limit error // the cap sentinel the counted writer refused the write with.
+}
+
+// Error returns the underlying library message unchanged.
+func (e *limitChainError) Error() string {
+	return e.err.Error()
+}
+
+// Unwrap returns both the library error and the cap sentinel it hid.
+func (e *limitChainError) Unwrap() []error {
+	return []error{e.err, e.limit}
+}
+
 // ExtractError is a rich error type that can carry multiple errors and warnings
 // from an extraction attempt. Consumers can use errors.As to retrieve it.
 type ExtractError struct {

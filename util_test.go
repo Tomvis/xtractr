@@ -97,3 +97,25 @@ func safeCloser(t *testing.T, c io.Closer) {
 	err := c.Close()
 	require.NoError(t, err)
 }
+
+// requireOutputDirEmpty fails when an aborted extract left anything behind in
+// the output folder. ExtractCUE discards the file list when a split fails, so
+// any file still sitting there is an orphan nobody owns — and a partial album a
+// downstream importer would happily pick up.
+func requireOutputDirEmpty(t *testing.T, dir string) {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return // never created: nothing to leave behind.
+	}
+
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+
+	require.Empty(t, names, "an aborted split must not leave files in the output folder")
+}

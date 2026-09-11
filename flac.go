@@ -63,6 +63,8 @@ func splitFLAC(xFile *XFile, audioPath string, cue *CueSheet, timestamps []cueTi
 		picturePaths, pictureBytes, err = writePicturesToFiles(xFile, xFile.OutputDir, pictures, xFile.FileMode)
 		switch {
 		case IsLimitError(err):
+			xFile.removeExtractedFiles(picturePaths)
+
 			return 0, nil, err
 		case err != nil:
 			xFile.Debugf("Error writing album art files: %s", err)
@@ -76,6 +78,10 @@ func splitFLAC(xFile *XFile, audioPath string, cue *CueSheet, timestamps []cueTi
 	// Stream frames one at a time, writing each to the appropriate track encoder.
 	totalSize, files, err := streamTracksFLAC(xFile, audioPath, cue, trackStarts, trackEnds, streamInfo, flacMeta)
 	if err != nil {
+		// The splitter removed its own tracks; the art written before them has
+		// to go too, or an aborted split leaves a lone cover behind.
+		xFile.removeExtractedFiles(picturePaths)
+
 		return 0, nil, err
 	}
 
@@ -88,8 +94,11 @@ func splitFLAC(xFile *XFile, audioPath string, cue *CueSheet, timestamps []cueTi
 
 // trackEncoder holds an open encoder for a single output track during streaming.
 type trackEncoder struct {
-	enc        *flac.Encoder
-	held       *frame.Frame // last built frame, not yet written (see writeClip)
+	enc  *flac.Encoder
+	held *frame.Frame // last built frame, not yet written (see writeClip)
+	// counted is the writer the encoder writes through. Kept so a cap it
+	// refused can be re-attached to the encoder's own error: see capError.
+	counted    *countedWriteSeeker
 	outputPath string
 	number     int
 	start      uint64
@@ -259,12 +268,14 @@ func (s *trackSplitter) openEncoder(idx int) (*trackEncoder, error) {
 		return nil, fmt.Errorf("creating output file for track %d: %w", track.Number, err)
 	}
 
-	enc, err := flac.NewEncoder(s.xFile.countedWriteSeeker(outFile), trackInfo, blocks...)
+	counted := s.xFile.countedWriteSeeker(outFile)
+
+	enc, err := flac.NewEncoder(counted, trackInfo, blocks...)
 	if err != nil {
 		_ = outFile.Close()
 		_ = os.Remove(usedPath)
 
-		return nil, fmt.Errorf("creating encoder for track %d: %w", track.Number, err)
+		return nil, fmt.Errorf("creating encoder for track %d: %w", track.Number, counted.capError(err))
 	}
 
 	err = s.xFile.countExtracted()
@@ -277,6 +288,7 @@ func (s *trackSplitter) openEncoder(idx int) (*trackEncoder, error) {
 
 	return &trackEncoder{
 		enc:        enc,
+		counted:    counted,
 		outputPath: usedPath,
 		number:     track.Number,
 		start:      s.trackStarts[idx],
@@ -334,7 +346,7 @@ func (e *trackEncoder) writeClip(src *frame.Frame, offset, count int) error {
 
 	err := e.enc.WriteFrame(write)
 	if err != nil {
-		return fmt.Errorf("encoding flac frame: %w", err)
+		return fmt.Errorf("encoding flac frame: %w", e.counted.capError(err))
 	}
 
 	return nil
@@ -451,7 +463,7 @@ func (e *trackEncoder) flushHeld() error {
 	e.held = nil
 
 	if err != nil {
-		return fmt.Errorf("encoding flac frame: %w", err)
+		return fmt.Errorf("encoding flac frame: %w", e.counted.capError(err))
 	}
 
 	return nil
@@ -512,7 +524,8 @@ func (s *trackSplitter) finalize(encoder *trackEncoder) error {
 	if err != nil {
 		_ = os.Remove(encoder.outputPath)
 
-		return fmt.Errorf("closing track %d encoder (%s): %w", encoder.number, encoder.outputPath, err)
+		return fmt.Errorf("closing track %d encoder (%s): %w",
+			encoder.number, encoder.outputPath, encoder.counted.capError(err))
 	}
 
 	stat, err := os.Stat(encoder.outputPath)
@@ -539,10 +552,12 @@ func (s *trackSplitter) closeOpen() {
 	s.open = nil
 }
 
+// removeFiles deletes every track this splitter wrote and hands their MaxFiles
+// reservations back: the caller discards the file list on error, so a kept
+// track would be an orphan, and a kept reservation would charge a later
+// extract sharing this budget for a file that no longer exists.
 func (s *trackSplitter) removeFiles() {
-	for _, path := range s.files {
-		_ = os.Remove(path)
-	}
+	s.xFile.removeExtractedFiles(s.files)
 }
 
 // flacMetadata holds metadata read from a FLAC file for use when splitting by CUE.

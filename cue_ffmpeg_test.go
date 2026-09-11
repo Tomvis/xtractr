@@ -277,9 +277,12 @@ func TestExtractCUE_FFmpeg_MaxFiles(t *testing.T) {
 	require.ErrorIs(t, err, xtractr.ErrMaxFiles)
 	require.True(t, xtractr.IsLimitError(err), "MaxFiles must be reported as a limit error")
 
-	// The first track fit in the budget; the second was never written.
-	require.FileExists(t, filepath.Join(out, "01 - One.flac"))
+	// The first track fit in the budget and the second was refused, but an
+	// aborted split hands back no album at all: what was already written is
+	// removed, the way the FLAC path's removeFiles does it.
+	require.NoFileExists(t, filepath.Join(out, "01 - One.flac"))
 	require.NoFileExists(t, filepath.Join(out, "02 - Two.flac"))
+	requireOutputDirEmpty(t, out)
 }
 
 // TestExtractCUE_FFmpeg_MaxBytes ensures bytes produced by ffmpeg consume the
@@ -308,6 +311,7 @@ func TestExtractCUE_FFmpeg_MaxBytes(t *testing.T) {
 	// The over-cap track must not be left on disk.
 	require.NoFileExists(t, filepath.Join(out, "01 - One.flac"))
 	require.NoFileExists(t, filepath.Join(out, "02 - Two.flac"))
+	requireOutputDirEmpty(t, out)
 }
 
 // TestExtractCUE_FFmpeg_MaxRatio ensures the ffmpeg path also honors the
@@ -329,4 +333,48 @@ func TestExtractCUE_FFmpeg_MaxRatio(t *testing.T) {
 	})
 	require.ErrorIs(t, err, xtractr.ErrMaxRatio)
 	require.True(t, xtractr.IsLimitError(err), "MaxRatio must be reported as a limit error")
+
+	requireOutputDirEmpty(t, out)
+}
+
+// TestExtractCUE_FFmpeg_MaxBytesLeavesNoPartialAlbum caps the split just above
+// what a single track costs, so the first track is written and kept while the
+// second crosses MaxBytes. That is the shape of the real failure: an album
+// aborted at the cap used to leave its first tracks on disk, where a downstream
+// importer would find a half album that no caller ever heard about.
+func TestExtractCUE_FFmpeg_MaxBytesLeavesNoPartialAlbum(t *testing.T) {
+	t.Parallel()
+	ffmpegOrSkip(t)
+
+	dir := t.TempDir()
+	cuePath := makeFFmpegCueAlbum(t, dir, 6)
+
+	// Measure a real track: the cap has to sit above the first and below the second.
+	reference := t.TempDir()
+
+	_, _, _, err := xtractr.ExtractCUE(&xtractr.XFile{
+		FilePath:  cuePath,
+		OutputDir: reference,
+		FileMode:  0o644,
+		DirMode:   0o750,
+	})
+	require.NoError(t, err)
+
+	info, err := os.Stat(filepath.Join(reference, "01 - One.flac"))
+	require.NoError(t, err)
+
+	trackBytes := uint64(info.Size())
+	out := t.TempDir()
+
+	_, _, _, err = xtractr.ExtractCUE(&xtractr.XFile{
+		FilePath:  cuePath,
+		OutputDir: out,
+		FileMode:  0o644,
+		DirMode:   0o750,
+		MaxBytes:  trackBytes + trackBytes/2,
+	})
+	require.ErrorIs(t, err, xtractr.ErrMaxBytes)
+	require.True(t, xtractr.IsLimitError(err), "MaxBytes must be reported as a limit error")
+
+	requireOutputDirEmpty(t, out)
 }

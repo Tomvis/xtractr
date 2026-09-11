@@ -501,7 +501,13 @@ func splitAPE(
 
 		size, usedPath, writeErr := writeTrackAPE(xFile, outputPath, info, srcFile, fr.start, fr.end, xFile.FileMode)
 		if writeErr != nil {
-			return totalSize, files, fmt.Errorf("writing ape track %d: %w", track.Number, writeErr)
+			// writeTrackAPE removed the track it was working on; the tracks
+			// before it go too. ExtractCUE discards the file list on error, so
+			// anything kept here is a partial album nobody was told about. Same
+			// rollback as trackSplitter.removeFiles on the FLAC path.
+			xFile.removeExtractedFiles(files)
+
+			return 0, nil, fmt.Errorf("writing ape track %d: %w", track.Number, writeErr)
 		}
 
 		totalSize += size
@@ -546,6 +552,8 @@ func writeTrackAPE(
 
 	if err != nil {
 		_ = os.Remove(usedPath)
+		xFile.uncountExtracted() // the write was counted; the file is gone.
+
 		return 0, usedPath, err
 	}
 

@@ -816,3 +816,31 @@ func TestReadAPESeekTableRejectsHugeTotalFrames(t *testing.T) {
 	_, err := parseAPE(path)
 	require.ErrorIs(t, err, ErrAPESeekTable)
 }
+
+// TestSplitAPEAbortLeavesNoPartialAlbum ensures a cap hit part-way through an
+// APE split takes the tracks already written with it. ExtractCUE discards the
+// file list on error, so a kept track is a partial album nobody was told about.
+func TestSplitAPEAbortLeavesNoPartialAlbum(t *testing.T) {
+	t.Parallel()
+
+	srcPath := defaultSyntheticAPE(equalFrames(4)).writeTo(t)
+	outDir := t.TempDir()
+
+	xFile := &XFile{OutputDir: outDir, FileMode: 0o600, DirMode: 0o700, MaxFiles: 1}
+	xFile.newProgress(0, 0, 2)
+
+	cue := &CueSheet{Tracks: []CueTrack{
+		{Number: 1, Title: "First"},
+		{Number: 2, Title: "Second"},
+	}}
+
+	_, files, err := splitAPE(xFile, srcPath, cue, []cueTimestamp{{}, {seconds: 2}})
+	require.ErrorIs(t, err, ErrMaxFiles)
+	assert.True(t, IsLimitError(err), "MaxFiles must be reported as a limit error")
+	assert.Empty(t, files)
+
+	entries, err := os.ReadDir(outDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "an aborted split must not leave tracks in the output folder")
+	assert.Zero(t, xFile.prog.Files, "the removed track's reservation must be handed back")
+}

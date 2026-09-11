@@ -820,3 +820,107 @@ func TestCueExtractCUE_StreamingMemoryIsBounded(t *testing.T) {
 		"peak heap growth %d MiB exceeds %d MiB — splitter may be buffering the whole file again",
 		peakDelta>>20, maxPeakDelta>>20)
 }
+
+// makeCueFLACAlbum writes a two-track CUE sheet next to the cover-bearing FLAC
+// it references, so ExtractCUE takes the pure-Go streaming FLAC path.
+func makeCueFLACAlbum(t *testing.T, dir string, totalSamples uint64) string {
+	t.Helper()
+
+	generateTestFLACWithCover(t, filepath.Join(dir, "album.flac"), totalSamples)
+
+	cueContent := strings.Join([]string{
+		`PERFORMER "Capped Artist"`,
+		`TITLE "Capped Album"`,
+		`FILE "album.flac" WAVE`,
+		`  TRACK 01 AUDIO`,
+		`    TITLE "One"`,
+		`    INDEX 01 00:00:00`,
+		`  TRACK 02 AUDIO`,
+		`    TITLE "Two"`,
+		`    INDEX 01 00:15:00`,
+	}, "\n") + "\n"
+
+	cuePath := filepath.Join(dir, "album.cue")
+	require.NoError(t, os.WriteFile(cuePath, []byte(cueContent), 0o600))
+
+	return cuePath
+}
+
+// cueFLACAlbumSamples is 30 seconds of audio: two 15-second tracks, each of
+// which is megabytes of verbatim-coded FLAC, so the byte caps below trip well
+// inside the first track instead of at its header.
+const cueFLACAlbumSamples = uint64(30 * testSampleRate)
+
+// TestCueExtractCUE_FLAC_MaxBytes checks that a MaxBytes hit inside the
+// streaming FLAC encoder still reaches the caller as a limit error. The refused
+// write is handed to github.com/mewkiz/flac, whose error type carries no Unwrap
+// method, so without help the sentinel is unreachable to errors.Is and callers
+// retry an extract that can never succeed.
+func TestCueExtractCUE_FLAC_MaxBytes(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	outputDir := filepath.Join(tmpDir, "output")
+	cuePath := makeCueFLACAlbum(t, tmpDir, cueFLACAlbumSamples)
+
+	_, _, _, err := xtractr.ExtractCUE(&xtractr.XFile{
+		FilePath:  cuePath,
+		OutputDir: outputDir,
+		FileMode:  0o600,
+		DirMode:   0o755,
+		MaxBytes:  100 << 10, // a 15-second track is an order of magnitude larger
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, xtractr.ErrMaxBytes)
+	require.True(t, xtractr.IsLimitError(err), "MaxBytes must be reported as a limit error: %v", err)
+
+	requireOutputDirEmpty(t, outputDir)
+}
+
+// TestCueExtractCUE_FLAC_MaxRatio is TestCueExtractCUE_FLAC_MaxBytes for the
+// ratio cap, which shares the byte accounting and the same severed error chain.
+func TestCueExtractCUE_FLAC_MaxRatio(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	outputDir := filepath.Join(tmpDir, "output")
+	cuePath := makeCueFLACAlbum(t, tmpDir, cueFLACAlbumSamples)
+
+	_, _, _, err := xtractr.ExtractCUE(&xtractr.XFile{
+		FilePath:  cuePath,
+		OutputDir: outputDir,
+		FileMode:  0o600,
+		DirMode:   0o755,
+		MaxRatio:  0.01, // the split tracks are the size of the source, not 1% of it
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, xtractr.ErrMaxRatio)
+	require.True(t, xtractr.IsLimitError(err), "MaxRatio must be reported as a limit error: %v", err)
+
+	requireOutputDirEmpty(t, outputDir)
+}
+
+// TestCueExtractCUE_FLAC_MaxFiles checks the file cap on the FLAC path: the
+// embedded cover art spends the budget's only slot, so the first track is
+// refused before its encoder is opened — and the art it already wrote must not
+// be left behind as the sole content of the output folder.
+func TestCueExtractCUE_FLAC_MaxFiles(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	outputDir := filepath.Join(tmpDir, "output")
+	cuePath := makeCueFLACAlbum(t, tmpDir, cueFLACAlbumSamples)
+
+	_, _, _, err := xtractr.ExtractCUE(&xtractr.XFile{
+		FilePath:  cuePath,
+		OutputDir: outputDir,
+		FileMode:  0o600,
+		DirMode:   0o755,
+		MaxFiles:  1,
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, xtractr.ErrMaxFiles)
+	require.True(t, xtractr.IsLimitError(err), "MaxFiles must be reported as a limit error: %v", err)
+
+	requireOutputDirEmpty(t, outputDir)
+}

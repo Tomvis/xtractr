@@ -1,6 +1,7 @@
 package xtractr
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -589,6 +590,10 @@ type countedWriteSeeker struct {
 	file   io.WriteSeeker
 	offset int64
 	maxOff int64
+	// limitErr is the cap error this writer refused a write with. It is kept
+	// because the caller often sees that error only after a third-party
+	// encoder has re-wrapped it; see capError.
+	limitErr error
 }
 
 func extraBytes(offset, wrote, maxOff int64) int64 {
@@ -611,6 +616,10 @@ func (c *countedWriteSeeker) Write(data []byte) (int, error) {
 
 		err := c.checkWriteLocked(uint64(want))
 		if err != nil {
+			if c.limitErr == nil {
+				c.limitErr = err // first refusal wins; see capError.
+			}
+
 			c.mu.Unlock()
 
 			return 0, err
@@ -661,6 +670,36 @@ func (c *countedWriteSeeker) Close() error {
 	return closer.Close() //nolint:wrapcheck
 }
 
+// limitError returns the extract cap this writer refused a write with, or nil
+// when it never refused one.
+func (c *countedWriteSeeker) limitError() error {
+	if c == nil || c.progressTracker == nil {
+		return nil
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.limitErr
+}
+
+// capError restores the cap sentinel on an error that came back out of a
+// library we do not control. github.com/mewkiz/flac hands a failed write to
+// errutil, whose error type carries the message but has no Unwrap method, so
+// the chain from what the caller sees back to ErrMaxBytes/ErrMaxRatio is cut:
+// errors.Is fails and IsLimitError reports a hard cap hit as a retryable
+// failure, which makes callers retry an extract that can never succeed. This
+// writer knows what it refused, so it ties the sentinel back on. The message is
+// left exactly as the library wrote it — only detectability is restored.
+func (c *countedWriteSeeker) capError(err error) error {
+	limitErr := c.limitError()
+	if err == nil || limitErr == nil || errors.Is(err, limitErr) {
+		return err
+	}
+
+	return &limitChainError{err: err, limit: limitErr}
+}
+
 func (x *XFile) wrapExtractWriter(writer io.Writer, parallel bool) (io.Writer, error) {
 	if x == nil || x.prog == nil {
 		return writer, nil
@@ -690,6 +729,20 @@ func (x *XFile) uncountExtracted() {
 
 	if x.prog.Files > 0 {
 		x.prog.Files--
+	}
+}
+
+// removeExtractedFiles deletes outputs an aborted extract already wrote and
+// hands each one's MaxFiles reservation back. ExtractCUE discards the file list
+// when a split fails, so a file left behind is an orphan nobody was told about:
+// a partial album a downstream importer would take for the whole thing.
+// Removal errors are ignored and the slot is returned either way, the same
+// pairing every other rollback here uses (ffmpegCut.run, extractCover).
+func (x *XFile) removeExtractedFiles(paths []string) {
+	for _, path := range paths {
+		_ = os.Remove(path)
+
+		x.uncountExtracted()
 	}
 }
 

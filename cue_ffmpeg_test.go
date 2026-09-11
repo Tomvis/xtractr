@@ -160,7 +160,8 @@ func TestExtractCover_PNGExtension(t *testing.T) {
 	require.True(t, hasCover, "source must report embedded cover")
 	require.Equal(t, "png", strings.ToLower(codec))
 
-	out := xtractr.ExtractCoverForTest(src, filepath.Join(dir, "cover"), codec)
+	out, err := xtractr.ExtractCoverForTest(src, filepath.Join(dir, "cover"), codec)
+	require.NoError(t, err)
 	require.Equal(t, filepath.Join(dir, "cover.png"), out, "PNG cover must be written as cover.png, not cover.jpg")
 	require.FileExists(t, out)
 }
@@ -189,4 +190,143 @@ FILE "album.wv" WAVE
 	require.Greater(t, size, uint64(0))
 	require.GreaterOrEqual(t, len(files), 3) // 2 tracks + the copied .cue
 	require.Len(t, archives, 2)              // [cue, audio]
+}
+
+// makeFFmpegCueAlbum writes a two-track CUE sheet and the WAV source it
+// references, so ExtractCUE takes the ffmpeg path (WAV is never pure-Go).
+func makeFFmpegCueAlbum(t *testing.T, dir string, seconds int) string {
+	t.Helper()
+
+	makeSineSource(t, filepath.Join(dir, "album.wav"), seconds)
+
+	cue := `PERFORMER "The Band"
+TITLE "The Album"
+FILE "album.wav" WAVE
+  TRACK 01 AUDIO
+    TITLE "One"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Two"
+    INDEX 01 00:03:00`
+	cuePath := filepath.Join(dir, "album.cue")
+	require.NoError(t, os.WriteFile(cuePath, []byte(cue), 0o600))
+
+	return cuePath
+}
+
+// TestExtractCUE_FFmpeg_SymlinkedDestinationNotFollowed plants a symlink at the
+// path the first track will be written to, pointing at a file outside the
+// output folder. ffmpeg opens the path it is given and happily writes through a
+// link, so the destination has to be made safe before ffmpeg ever sees it.
+func TestExtractCUE_FFmpeg_SymlinkedDestinationNotFollowed(t *testing.T) {
+	t.Parallel()
+	ffmpegOrSkip(t)
+
+	dir := t.TempDir()
+	cuePath := makeFFmpegCueAlbum(t, dir, 6)
+
+	victim := filepath.Join(dir, "victim.txt")
+	require.NoError(t, os.WriteFile(victim, []byte("original"), 0o600))
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0o750))
+
+	planted := filepath.Join(out, "01 - One.flac")
+	if err := os.Symlink(victim, planted); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	_, files, _, err := xtractr.ExtractCUE(&xtractr.XFile{
+		FilePath:  cuePath,
+		OutputDir: out,
+		FileMode:  0o644,
+		DirMode:   0o750,
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(files), 3) // 2 tracks + the copied .cue
+
+	// The file outside the output folder must be untouched.
+	data, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	require.Equal(t, "original", string(data), "ffmpeg must not write through the planted symlink")
+
+	// And the track must have replaced the link with a real, tagged FLAC.
+	info, err := os.Lstat(planted)
+	require.NoError(t, err)
+	require.Zero(t, info.Mode()&os.ModeSymlink, "symlink must be replaced by a regular file")
+	require.Equal(t, "One", xtractr.ReadVorbisTagForTest(t, planted, "TITLE"))
+}
+
+// TestExtractCUE_FFmpeg_MaxFiles ensures tracks produced by ffmpeg consume the
+// MaxFiles budget: with room for one file, the second track is refused.
+func TestExtractCUE_FFmpeg_MaxFiles(t *testing.T) {
+	t.Parallel()
+	ffmpegOrSkip(t)
+
+	dir := t.TempDir()
+	cuePath := makeFFmpegCueAlbum(t, dir, 6)
+	out := t.TempDir()
+
+	_, _, _, err := xtractr.ExtractCUE(&xtractr.XFile{
+		FilePath:  cuePath,
+		OutputDir: out,
+		FileMode:  0o644,
+		DirMode:   0o750,
+		MaxFiles:  1,
+	})
+	require.ErrorIs(t, err, xtractr.ErrMaxFiles)
+	require.True(t, xtractr.IsLimitError(err), "MaxFiles must be reported as a limit error")
+
+	// The first track fit in the budget; the second was never written.
+	require.FileExists(t, filepath.Join(out, "01 - One.flac"))
+	require.NoFileExists(t, filepath.Join(out, "02 - Two.flac"))
+}
+
+// TestExtractCUE_FFmpeg_MaxBytes ensures bytes produced by ffmpeg consume the
+// MaxBytes budget. ffmpeg writes the file itself, so the overage is caught
+// after the encode and the partial track is removed.
+func TestExtractCUE_FFmpeg_MaxBytes(t *testing.T) {
+	t.Parallel()
+	ffmpegOrSkip(t)
+
+	dir := t.TempDir()
+	cuePath := makeFFmpegCueAlbum(t, dir, 6)
+	out := t.TempDir()
+
+	const maxBytes = 4096 // a 3-second FLAC track is an order of magnitude larger
+
+	_, _, _, err := xtractr.ExtractCUE(&xtractr.XFile{
+		FilePath:  cuePath,
+		OutputDir: out,
+		FileMode:  0o644,
+		DirMode:   0o750,
+		MaxBytes:  maxBytes,
+	})
+	require.ErrorIs(t, err, xtractr.ErrMaxBytes)
+	require.True(t, xtractr.IsLimitError(err), "MaxBytes must be reported as a limit error")
+
+	// The over-cap track must not be left on disk.
+	require.NoFileExists(t, filepath.Join(out, "01 - One.flac"))
+	require.NoFileExists(t, filepath.Join(out, "02 - Two.flac"))
+}
+
+// TestExtractCUE_FFmpeg_MaxRatio ensures the ffmpeg path also honors the
+// compression-ratio cap, which shares the byte accounting with MaxBytes.
+func TestExtractCUE_FFmpeg_MaxRatio(t *testing.T) {
+	t.Parallel()
+	ffmpegOrSkip(t)
+
+	dir := t.TempDir()
+	cuePath := makeFFmpegCueAlbum(t, dir, 6)
+	out := t.TempDir()
+
+	_, _, _, err := xtractr.ExtractCUE(&xtractr.XFile{
+		FilePath:  cuePath,
+		OutputDir: out,
+		FileMode:  0o644,
+		DirMode:   0o750,
+		MaxRatio:  0.01, // FLAC of a sine is small, but not 1% of the WAV source
+	})
+	require.ErrorIs(t, err, xtractr.ErrMaxRatio)
+	require.True(t, xtractr.IsLimitError(err), "MaxRatio must be reported as a limit error")
 }

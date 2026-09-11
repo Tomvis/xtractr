@@ -693,6 +693,47 @@ func (x *XFile) uncountExtracted() {
 	}
 }
 
+// countExternalWrite charges bytes that are already on disk against MaxBytes
+// and MaxRatio. Everything this package writes itself streams through
+// wrapExtractWriter or countedWriteSeeker, which refuse the write that would
+// cross a cap before it reaches the file. An external process (ffmpeg, in the
+// CUE path) hands back a finished file instead, so the bytes exist before they
+// can be checked: the caller must delete that file when this returns an error.
+func (x *XFile) countExternalWrite(size uint64) error {
+	if x == nil || x.prog == nil {
+		return nil
+	}
+
+	x.prog.mu.Lock()
+
+	err := x.prog.checkWriteLocked(size)
+	if err != nil {
+		x.prog.mu.Unlock()
+		return err
+	}
+
+	x.prog.Wrote += size
+	x.prog.mu.Unlock()
+
+	x.prog.send()
+
+	return nil
+}
+
+// extractBytesRemaining reports how many more bytes may be written before
+// MaxBytes or MaxRatio trips, or unlimitedBytes when neither is configured.
+// Used to cap an external writer that cannot be interrupted mid-write.
+func (x *XFile) extractBytesRemaining() uint64 {
+	if x == nil || x.prog == nil {
+		return unlimitedBytes
+	}
+
+	x.prog.mu.Lock()
+	defer x.prog.mu.Unlock()
+
+	return remainingBytes(x.prog.Wrote, x.prog.Compressed, x.MaxBytes, x.MaxRatio)
+}
+
 func (p *progressTracker) reader(reader io.Reader) io.Reader {
 	return &progressWrapper{Reader: reader, progressTracker: p}
 }

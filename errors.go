@@ -51,6 +51,9 @@ var (
 	// ErrTrackTooShort is returned when a CUE track holds fewer samples than the
 	// FLAC minimum block size; encoding it would record an invalid STREAMINFO.
 	ErrTrackTooShort = errors.New("cue track is shorter than the minimum FLAC block size")
+	// errEmptyCover reports that ffmpeg produced no usable cover art. Cover art
+	// is best-effort, so the CUE path logs this and continues without art.
+	errEmptyCover = errors.New("ffmpeg produced no cover art")
 
 	// RPM.
 

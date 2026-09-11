@@ -2,6 +2,7 @@ package xtractr
 
 import (
 	"os"
+	"path/filepath"
 
 	flacvorbis "github.com/go-flac/flacvorbis/v2"
 	goflac "github.com/go-flac/go-flac/v2"
@@ -47,9 +48,9 @@ func ProbeTagsForTest(t interface{ Fatalf(string, ...any) }, path string) map[st
 	return m
 }
 
-// CutTrackFLACForTest exposes cutTrackFLAC for tests.
+// CutTrackFLACForTest exposes cutTrackFLAC for tests, uncapped.
 func CutTrackFLACForTest(src, out string, startSec, durSec float64) error {
-	return cutTrackFLAC(src, out, startSec, durSec)
+	return cutTrackFLAC(src, out, startSec, durSec, unlimitedBytes)
 }
 
 // RetagFLACForTest exposes retagFLAC for tests.
@@ -115,9 +116,14 @@ func ProbeCoverForTest(t interface{ Fatalf(string, ...any) }, path string) (stri
 	return p.coverCodec, p.hasCover
 }
 
-// ExtractCoverForTest exposes extractCover for tests.
-func ExtractCoverForTest(src, destNoExt, codec string) string {
-	return extractCover(src, destNoExt, codec)
+// ExtractCoverForTest exposes extractCover for tests. The art's own folder acts
+// as the output dir so the destination containment check has a base.
+func ExtractCoverForTest(src, destNoExt, codec string) (string, error) {
+	xFile := &XFile{OutputDir: filepath.Dir(destNoExt), FileMode: 0o644, DirMode: 0o755}
+
+	path, _, err := extractCover(xFile, src, destNoExt, codec)
+
+	return path, err
 }
 
 // ExtractCUEForTest runs the full ExtractCUE on a .cue path for integration tests.

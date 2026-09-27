@@ -109,6 +109,13 @@ func TestFFmpegTargetVerifyRejectsSwap(t *testing.T) {
 	target, err := prepareFFmpegOutput(xFile, dest)
 	require.NoError(t, err)
 
+	// Hold the original open: an unlinked inode stays allocated while open, so the
+	// files planted below cannot reuse its number. SameFile compares dev+inode, and
+	// ext4/overlayfs hand a freed inode straight back (APFS never does).
+	held, err := os.Open(dest)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = held.Close() })
+
 	_, err = target.verify()
 	require.NoError(t, err, "the file we just created must verify")
 

@@ -425,7 +425,10 @@ func (p *progressTracker) wrote() uint64 {
 }
 
 func newSharedBudget() *progressTracker {
-	return &progressTracker{shared: true}
+	tracker := &progressTracker{shared: true}
+	tracker.send = func() {}
+
+	return tracker
 }
 
 const (
@@ -796,6 +799,13 @@ func (p *progressTracker) readAter(reader io.ReaderAt) io.ReaderAt {
 }
 
 func (p *progressTracker) done() {
+	if p == nil {
+		return
+	}
+
 	p.Done = true
-	p.send()
+
+	if p.send != nil {
+		p.send()
+	}
 }

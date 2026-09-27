@@ -1,12 +1,12 @@
 module golift.io/xtractr
 
-go 1.25.7
+go 1.26.0
 
-toolchain go1.27.0
+toolchain go1.27.1
 
 require (
 	github.com/Unpackerr/iso9660 v0.0.3
-	github.com/andybalholm/brotli v1.2.2
+	github.com/andybalholm/brotli v1.2.4
 	github.com/bodgit/sevenzip v1.6.5
 	github.com/cavaliergopher/cpio v1.0.1
 	github.com/cavaliergopher/rpm v1.3.0
@@ -14,18 +14,18 @@ require (
 	github.com/go-flac/flacpicture/v2 v2.0.2
 	github.com/go-flac/flacvorbis/v2 v2.0.2
 	github.com/go-flac/go-flac/v2 v2.0.4
-	github.com/klauspost/compress v1.19.2
+	github.com/klauspost/compress v1.20.0
 	github.com/mewkiz/flac v1.0.14
 	github.com/nwaples/rardecode/v2 v2.4.1
 	github.com/peterebden/ar v0.0.0-20241106141004-20dc11b778e8
-	github.com/pierrec/lz4/v4 v4.1.29
+	github.com/pierrec/lz4/v4 v4.1.30
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d
 	github.com/sshaman1101/dcompress v0.0.0-20200109162717-50436a6332de
 	github.com/stretchr/testify v1.12.1
 	github.com/therootcompany/xz v1.0.1
-	github.com/ulikunitz/xz v0.5.16
-	golang.org/x/text v0.41.0
-	golift.io/udf v0.0.1
+	github.com/ulikunitz/xz v0.5.17
+	golang.org/x/text v0.42.0
+	golift.io/udf v0.1.0
 )
 
 require (

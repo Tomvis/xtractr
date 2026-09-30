@@ -114,7 +114,7 @@ func trackDurations(starts []float64) []float64 {
 	return durs
 }
 
-// ExtractCUE extracts individual tracks from a FLAC file referenced by a CUE sheet.
+// ExtractCUE extracts individual tracks from a FLAC or APE file referenced by a CUE sheet.
 // The xFile.FilePath should point to the .cue file (or .cue.txt).
 func ExtractCUE(xFile *XFile) (size uint64, files, archives []string, err error) {
 	cue, timestamps, err := parseCueSheetFile(xFile.FilePath)
@@ -139,11 +139,11 @@ func ExtractCUE(xFile *XFile) (size uint64, files, archives []string, err error)
 	switch {
 	case ext == ".flac":
 		size, files, err = splitFLAC(xFile, audioPath, cue, timestamps)
-	case ext == ".ape" && !cueUseFFmpegForAPE():
-		// Native, pure-Go Monkey's Audio decoder (upstream). Only reached when ffmpeg is
-		// missing: it emits untagged .ape tracks, where the ffmpeg path below emits tagged
-		// FLAC with cover art. Degraded output beats no output.
-		size, files, err = splitAPE(xFile, audioPath, cue, timestamps)
+	case ext == ".ape" && (xFile.APEOpts != APEOpts{} || !cueUseFFmpegForAPE()):
+		// Upstream's pure-Go Monkey's Audio decoder: used when the caller sets APEOpts
+		// (an output container or APE compression), or when ffmpeg is missing. Otherwise (fork default) the ffmpeg path
+		// below emits tagged FLAC with cover art.
+		size, files, err = splitAPEPlayable(xFile, audioPath, cue, timestamps)
 	case isSupportedCueAudioExt(ext): // .ape/.wv/.m4a/.wav -> ffmpeg path
 		size, files, err = splitViaFFmpeg(xFile, audioPath, cue, timestamps)
 	default:

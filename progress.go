@@ -923,7 +923,7 @@ func (x *XFile) extractBytesRemaining() uint64 {
 	x.prog.mu.Lock()
 	defer x.prog.mu.Unlock()
 
-	return remainingBytes(x.prog.Wrote, x.prog.Compressed, x.MaxBytes, x.MaxRatio)
+	return remainingBytes(x.prog.Wrote, ratioWrote(x.prog.Wrote, x.prog.ratioOmit), x.prog.Compressed, x.MaxBytes, x.MaxRatio)
 }
 
 func (p *progressTracker) reader(reader io.Reader) io.Reader {

@@ -6,7 +6,7 @@ toolchain go1.27.1
 
 require (
 	github.com/Unpackerr/iso9660 v0.0.3
-	github.com/andybalholm/brotli v1.2.5
+	github.com/andybalholm/brotli v1.2.6
 	github.com/bodgit/sevenzip v1.6.5
 	github.com/cavaliergopher/cpio v1.0.1
 	github.com/cavaliergopher/rpm v1.3.0
@@ -26,7 +26,7 @@ require (
 	github.com/ulikunitz/xz v0.5.17
 	golang.org/x/text v0.42.0
 	golift.io/ape v0.2.0
-	golift.io/asar v0.0.0-20260922041046-6f7004983a76
+	golift.io/asar v0.1.0
 	golift.io/udf v0.1.0
 )
 

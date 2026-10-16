@@ -194,7 +194,7 @@ func prepareFFmpegOutput(xFile *XFile, path string) (*ffmpegTarget, error) {
 		return nil, fmt.Errorf("%s: %w: %s resolves outside the output folder", xFile.FilePath, ErrInvalidPath, path)
 	}
 
-	fout, usedPath, err := openExtractFile(path, xFile.safeFileMode(xFile.FileMode)|ffmpegWriteMode)
+	fout, usedPath, err := openExtractFile(path, xFile.fileMode(0)|ffmpegWriteMode)
 	if err != nil {
 		return nil, err
 	}

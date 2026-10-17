@@ -16,6 +16,8 @@ import (
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/saintfish/chardet"
 )
 
 // supportedCueAudioExts lists the audio file extensions (lowercase, with dot)
@@ -55,6 +57,8 @@ type CueSheet struct {
 	FileType string
 	// Tracks contains the list of tracks in order.
 	Tracks []CueTrack
+	// fileCount is how many FILE lines the sheet has; File holds only the last.
+	fileCount int
 }
 
 // CueTrack represents a single track in a CUE sheet.
@@ -245,10 +249,58 @@ func parseCueSheetFile(path string) (*CueSheet, []cueTimestamp, error) {
 			data = data[3:]
 		}
 
+		if !utf8.Valid(data) {
+			data = decodeLegacyCue(data)
+		}
+
 		reader = bytes.NewReader(data)
 	}
 
 	return parseCueSheet(reader)
+}
+
+// decodeLegacyCue converts a non-UTF-8 CUE sheet (cp1251, Shift-JIS, ...) to
+// UTF-8 with chardet's highest-ranked charset that decodes it. A whole sheet is
+// enough text for chardet's own ranking; the zip scoring is tuned for short
+// file names. Data no candidate decodes is returned unchanged.
+func decodeLegacyCue(data []byte) []byte {
+	results, err := chardet.NewTextDetector().DetectAll(data)
+	if err != nil {
+		return data
+	}
+
+	for _, result := range results {
+		enc := charsetToEncoding(result.Charset)
+		if enc == nil {
+			continue
+		}
+
+		decoded, err := enc.NewDecoder().Bytes(data)
+		if err == nil && utf8.Valid(decoded) {
+			return decoded
+		}
+	}
+
+	return data
+}
+
+// cueHasImage reports whether the CUE sheet at path describes one audio image
+// present beside it. Per-track rips (a FILE per track) and sheets whose audio
+// is missing have nothing to split, so Find does not list them as archives.
+func cueHasImage(path string) bool {
+	cue, _, err := parseCueSheetFile(path)
+	if err != nil || (cue.fileCount > 1 && cue.fileCount >= len(cue.Tracks)) {
+		return false
+	}
+
+	_, err = resolveCueAudioPath(filepath.Dir(path), cue.File, path)
+
+	return err == nil
+}
+
+// isCueSheetName reports whether a lowercase file name is a CUE sheet.
+func isCueSheetName(lowerName string) bool {
+	return strings.HasSuffix(lowerName, ".cue") || strings.HasSuffix(lowerName, ".cue.txt")
 }
 
 // decodeUTF16 decodes a UTF-16 encoded byte slice to UTF-8.
@@ -313,6 +365,7 @@ func parseCueSheet(reader io.Reader) (*CueSheet, []cueTimestamp, error) { //noli
 			fileName, fileType := parseCueFileCmd(args)
 			cue.File = fileName
 			cue.FileType = fileType
+			cue.fileCount++
 		case "TRACK":
 			if currentTrack != nil {
 				cue.Tracks = append(cue.Tracks, *currentTrack)

@@ -182,6 +182,8 @@ func getCompressedFiles(path string, filter *Filter, fileList []os.FileInfo, dep
 		case strings.HasSuffix(lowerName, ".r00") && !CheckR00ForRarFile(fileList, lowerName):
 			// Accept .r00 as the first archive file if no .rar files are present in the path.
 			addArchive(files, path, file, filter)
+		case isCueSheetName(lowerName) && !cueHasImage(filepath.Join(path, file.Name())):
+			continue // already split, or the image is missing: nothing to extract.
 		case !strings.HasSuffix(lowerName, ".r00") && IsArchiveFile(lowerName):
 			addArchive(files, path, file, filter)
 		}

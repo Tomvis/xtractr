@@ -14,9 +14,9 @@ require (
 	github.com/go-flac/flacpicture/v2 v2.0.2
 	github.com/go-flac/flacvorbis/v2 v2.0.2
 	github.com/go-flac/go-flac/v2 v2.0.4
-	github.com/klauspost/compress v1.20.1
+	github.com/klauspost/compress v1.20.3
 	github.com/mewkiz/flac v1.0.14
-	github.com/nwaples/rardecode/v2 v2.4.4
+	github.com/nwaples/rardecode/v2 v2.4.5
 	github.com/peterebden/ar v0.0.0-20241106141004-20dc11b778e8
 	github.com/pierrec/lz4/v4 v4.1.33
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d

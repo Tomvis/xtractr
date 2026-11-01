@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -219,6 +220,8 @@ func decodeLegacyCue(data []byte) []byte {
 		return data
 	}
 
+	var fallback []byte
+
 	for _, result := range results {
 		enc := charsetToEncoding(result.Charset)
 		if enc == nil {
@@ -226,26 +229,83 @@ func decodeLegacyCue(data []byte) []byte {
 		}
 
 		decoded, err := enc.NewDecoder().Bytes(data)
-		if err == nil && utf8.Valid(decoded) {
+		if err != nil || !utf8.Valid(decoded) {
+			continue
+		}
+
+		if !looksLikeLatinMojibake(decoded) {
 			return decoded
 		}
+
+		if fallback == nil {
+			fallback = decoded
+		}
+	}
+
+	if fallback != nil {
+		return fallback
 	}
 
 	return data
 }
 
-// cueHasImage reports whether the CUE sheet at path describes one audio image
-// present beside it. Per-track rips (a FILE per track) and sheets whose audio
-// is missing have nothing to split, so Find does not list them as archives.
+// looksLikeLatinMojibake reports whether most words that carry non-ASCII
+// letters are Latin and made almost only of accented letters. Real Latin text
+// mixes accents into ASCII words ("Café"); a Cyrillic or Greek sheet read as a
+// Latin code page turns every word into accents ("Ïåñíÿ"). chardet's ranking
+// alone can put ISO-8859-1 above windows-1251 for such sheets.
+func looksLikeLatinMojibake(text []byte) bool {
+	var words, bad int
+
+	for _, word := range strings.FieldsFunc(string(text), func(r rune) bool { return !unicode.IsLetter(r) }) {
+		var letters, accented int
+
+		latin := true
+
+		for _, r := range word {
+			letters++
+
+			if r > unicode.MaxASCII {
+				accented++
+				latin = latin && unicode.Is(unicode.Latin, r)
+			}
+		}
+
+		if accented == 0 {
+			continue
+		}
+
+		words++
+
+		if latin && accented*2 > letters {
+			bad++
+		}
+	}
+
+	return words > 0 && bad*2 > words
+}
+
+// cueHasImage reports whether the CUE sheet at path describes one FLAC or APE
+// image present beside it. Per-track rips (a FILE per track), sheets whose audio
+// is missing, and images ExtractCUE cannot split (WavPack, M4A, ...) have
+// nothing to extract, so Find does not list them as archives.
 func cueHasImage(path string) bool {
 	cue, _, err := parseCueSheetFile(path)
 	if err != nil || (cue.fileCount > 1 && cue.fileCount >= len(cue.Tracks)) {
 		return false
 	}
 
-	_, err = resolveCueAudioPath(filepath.Dir(path), cue.File, path)
+	audioPath, err := resolveCueAudioPath(filepath.Dir(path), cue.File, path)
+	if err != nil {
+		return false
+	}
 
-	return err == nil
+	switch strings.ToLower(filepath.Ext(audioPath)) {
+	case ".flac", ".ape":
+		return true
+	default:
+		return false
+	}
 }
 
 // isCueSheetName reports whether a lowercase file name is a CUE sheet.

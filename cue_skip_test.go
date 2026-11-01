@@ -98,3 +98,75 @@ func TestFindSkipsCueWithoutAudio(t *testing.T) {
 	found := xtractr.FindCompressedFiles(xtractr.Filter{Path: tmpDir})
 	assert.Empty(t, found.List())
 }
+
+// TestFindSkipsCueWithUnsplittableImage: only FLAC and APE images can be
+// split, so a WavPack image is left alone instead of failing every extract.
+func TestFindSkipsCueWithUnsplittableImage(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "album.wv"), []byte("wvpk"), 0o600))
+
+	cueContent := strings.Join([]string{
+		`FILE "album.wv" WAVE`,
+		`  TRACK 01 AUDIO`,
+		`    INDEX 01 00:00:00`,
+		`  TRACK 02 AUDIO`,
+		`    INDEX 01 04:00:00`,
+	}, "\n") + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0o600))
+
+	found := xtractr.FindCompressedFiles(xtractr.Filter{Path: tmpDir})
+	assert.Empty(t, found.List())
+}
+
+// TestCueWindows1251RankedBelowLatin: chardet ranks ISO-8859-1 above
+// windows-1251 for this real EAC sheet (Кино, MKK891CD3), so its top pick
+// turned every title into Latin mojibake ("Ïåñíÿ áåç ñëîâ").
+func TestCueWindows1251RankedBelowLatin(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	outputDir := filepath.Join(tmpDir, "output")
+
+	flacName := "Кино - Звезда по имени Солнце - Черновик (MKK891CD3).flac"
+	generateTestFLAC(t, filepath.Join(tmpDir, flacName), uint64(30*testSampleRate))
+
+	lines := []string{
+		`REM GENRE Rock`,
+		`REM DATE 1988 / 2019`,
+		`REM DISCID 6A098D09`,
+		`REM COMMENT "ExactAudioCopy v1.0b3"`,
+		`PERFORMER "Кино"`,
+		`TITLE "Звезда по имени Солнце - Черновик (Maschina Records, MKK891CD3)"`,
+		`FILE "` + flacName + `" WAVE`,
+	}
+
+	titles := []string{"Песня без слов (черновик)", "Невесёлая песня (черновик)", "Сказка (черновик)"}
+	for i, title := range titles {
+		lines = append(lines,
+			`  TRACK 0`+string(rune('1'+i))+` AUDIO`,
+			`    TITLE "`+title+`"`,
+			`    PERFORMER "Кино"`,
+			`    INDEX 01 00:0`+string(rune('0'+i*3))+`:00`,
+		)
+	}
+
+	encoded, err := charmap.Windows1251.NewEncoder().String(strings.Join(lines, "\r\n") + "\r\n")
+	require.NoError(t, err)
+
+	cuePath := filepath.Join(tmpDir, "Кино - Звезда по имени Солнце - Черновик (MKK891CD3).cue")
+	require.NoError(t, os.WriteFile(cuePath, []byte(encoded), 0o600))
+
+	_, files, _, err := xtractr.ExtractCUE(&xtractr.XFile{
+		FilePath:  cuePath,
+		OutputDir: outputDir,
+		FileMode:  0o600,
+		DirMode:   0o755,
+	})
+	require.NoError(t, err)
+
+	for i, title := range titles {
+		assert.Contains(t, files, filepath.Join(outputDir, "0"+string(rune('1'+i))+" - "+title+".flac"))
+	}
+}

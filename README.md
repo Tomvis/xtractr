@@ -8,7 +8,9 @@ Can also be used ad-hoc for direct decompression and extraction. See [GoDoc](htt
 - Works on Linux, Windows, FreeBSD and macOS **without Cgo**.
 - Supports 32 and 64 bit architectures.
 - Decrypts RAR and 7-Zip archives with passwords.
-- Extracts ISO images (ISO9660 and UDF volumes) and Electron ASAR archives.
+- Extracts ISO images (ISO9660 and UDF volumes, `.iso` and `.img`) and Electron ASAR archives.
+  A folder search lists a `.img` only when the file has an ISO 9660 or UDF signature.
+  `ExtractFile` on a `.img` always tries.
 - Splits FLAC+CUE and APE+CUE sheets into tracks. APE output can be APE, WAV, or FLAC.
 - `ConvertAPE` writes one APE file to APE, WAV, or FLAC when there is no CUE sheet.
 - Detects non-UTF8 zip filenames automatically.
@@ -123,7 +125,7 @@ know the file type you may call the direct method instead:
 - `ExtractZIP(*XFile)`, `ExtractRAR(*XFile)`, `Extract7z(*XFile)`
 - `ExtractTar(*XFile)`, `ExtractTarGzip(*XFile)`, `ExtractTarBzip(*XFile)`, `ExtractTarXZ(*XFile)`
 - `ExtractGzip(*XFile)`, `ExtractBzip(*XFile)`, `ExtractXZ(*XFile)`, `ExtractZstandard(*XFile)`
-- `ExtractISO(*XFile)`, `ExtractASAR(*XFile)`, `ExtractRPM(*XFile)`, `ExtractCPIO(*XFile)`
+- `ExtractISO(*XFile)` for `.iso` and `.img`, `ExtractASAR(*XFile)`, `ExtractRPM(*XFile)`, `ExtractCPIO(*XFile)`
 - `ExtractCUE(*XFile)` for a `.cue` or `.cue.txt` next to a FLAC or APE image
 - `ConvertAPE(*XFile)` for one APE file and no CUE sheet
 
@@ -221,6 +223,10 @@ type XFile struct {
 	// PreserveExec keeps archive execute bits for each class FileMode already
 	// grants. Off, FileMode is the mode passed to open. Umask still applies.
 	PreserveExec bool
+	// DisableSparse writes zero bytes instead of holes. Off, a run of 32 KiB
+	// of zeros is stored as a hole. A hole at the end of a file is closed with
+	// one zero byte so the file keeps its size.
+	DisableSparse bool
 	// Progress is called periodically during file extraction.
 	// Contains info about the progress of the extraction.
 	// This is not called if an Updates channel is also provided.
@@ -248,7 +254,9 @@ Extraction caps (`0` means unlimited):
 
 On a queue job (`Xtract`/`Config`) these apply **per top-level archive**. Two sibling rips in one folder each get a full cap. Extras from that folder share the **tighter leftover** (smallest remaining byte/ratio room, then files). `MaxRatio` keeps the parent archive size, not child compressed sizes. Bytes of an intermediate archive that same tracker wrote are left out of the ratio numerator when that archive is extracted; `MaxBytes` still counts them. Standalone `XFile` stays per-archive.
 
-A multi-volume RAR whose later volumes are not there yet (for example while a sync tool is still copying the set) returns `ErrMissingVolume`. It is not a cap error and `IsLimitError` is false for it: the archive is fine, and a later attempt succeeds once every volume is present.
+A multi-volume RAR or 7-Zip set that is not all on disk returns `ErrMissingVolume`. That covers a later volume that has not arrived yet, and a first volume that is missing so a later one would be read in its place. It is not a cap error and `IsLimitError` is false for it: the archive is fine, and a later attempt succeeds once every volume is present.
+
+`CheckVolumes` reads those headers and extracts nothing. A RAR is `.rar` or `.r00` through `.r99`. A 7-Zip volume is `.7z.001` and the parts after it, judged from the `.001`. It returns an error wrapping `ErrMissingVolume` when that set is short, nil when the set is whole or the file is not one of those volumes, and any other header error unchanged. RAR passwords are tried in the same order as `ExtractRAR`. A 7-Zip set is opened with `Password` and `Passwords` the same way as `Extract7z`.
 
 Queue extras caps on `Xtract` and `Config` (`0` inherits `Config`, then unlimited):
 

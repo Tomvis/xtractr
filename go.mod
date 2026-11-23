@@ -11,11 +11,11 @@ require (
 	github.com/cavaliergopher/cpio v1.0.1
 	github.com/cavaliergopher/rpm v1.3.0
 	github.com/dsnet/compress v0.0.1
-	github.com/klauspost/compress v1.20.4
+	github.com/klauspost/compress v1.20.5
 	github.com/mewkiz/flac v1.0.14
 	github.com/nwaples/rardecode/v2 v2.4.6
 	github.com/peterebden/ar v0.0.0-20241106141004-20dc11b778e8
-	github.com/pierrec/lz4/v4 v4.1.33
+	github.com/pierrec/lz4/v4 v4.1.34
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d
 	github.com/sshaman1101/dcompress v0.0.0-20200109162717-50436a6332de
 	github.com/stretchr/testify v1.12.1
@@ -24,7 +24,7 @@ require (
 	golang.org/x/text v0.44.0
 	golift.io/ape v0.2.0
 	golift.io/asar v0.1.0
-	golift.io/udf v0.2.0
+	golift.io/udf v0.2.1
 )
 
 require (
@@ -37,6 +37,7 @@ require (
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/stangelandcl/ppmd v0.1.1 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
-	golang.org/x/crypto v0.55.0 // indirect
+	go4.org v0.0.0-20261028031214-ed6929a230fe // indirect
+	golang.org/x/crypto v0.59.0 // indirect
+	golang.org/x/crypto/openpgp v0.1.0-deprecated // indirect
 )
